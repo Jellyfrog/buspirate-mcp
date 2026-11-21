@@ -467,3 +467,25 @@ class TestOneWireOperations:
         hw._active_mode = "spi"
         with pytest.raises(RuntimeError, match="Mode 'spi' is active"):
             hw.configure_1wire()
+
+
+class TestOneWireSearchRom:
+    def _hw(self, result):
+        client = MagicMock()
+        client.data_request.return_value = result
+        return BusPirateHardware(client=client, uart=MagicMock()), client
+
+    def test_sends_search_request(self):
+        hw, client = self._hw(b"\x28" + bytes(7))
+        assert hw.onewire_search_rom(4) == b"\x28" + bytes(7)
+        client.data_request.assert_called_once_with(
+            start_alt=True, data_write=[0xF0], bytes_read=32,
+        )
+
+    def test_no_devices_is_empty(self):
+        hw, _ = self._hw(None)
+        assert hw.onewire_search_rom() == b""
+
+    def test_failed_request_is_none(self):
+        hw, _ = self._hw(False)
+        assert hw.onewire_search_rom() is None

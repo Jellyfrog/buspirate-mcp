@@ -1576,3 +1576,60 @@ class TestValidateLaCommand:
 
     def test_no_brackets(self):
         assert "missing bus transaction brackets" in _validate_la_command("0x9f r:3")
+
+
+class TestOneWireSearchAll:
+    """Firmware Search ROM: every device, with fallback to Read ROM."""
+
+    @staticmethod
+    def _rom(family, serial):
+        body = bytes([family]) + serial
+        return body + bytes([_onewire_crc8(body)])
+
+    def _session(self, tmp_path, search_result):
+        mgr = SessionManager(engagements_dir=tmp_path)
+        hw = MagicMock()
+        hw.onewire_search_rom.return_value = search_result
+        return mgr, hw, mgr.create(name="t", hardware=hw, protocol="1wire")
+
+    @pytest.mark.asyncio
+    async def test_lists_every_device(self, tmp_path):
+        roms = (self._rom(0x28, bytes(range(1, 7))) +
+                self._rom(0x10, bytes(range(7, 13))))
+        mgr, hw, s = self._session(tmp_path, roms)
+        result = await tool_onewire_search(session_manager=mgr, session_id=s.session_id)
+        assert result["method"] == "search_rom"
+        assert result["count"] == 2
+        assert [d["family_code"] for d in result["devices"]] == ["0x28", "0x10"]
+        assert result["family_code"] == "0x28"  # first device at top level
+        hw.onewire_transfer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_empty_bus(self, tmp_path):
+        mgr, hw, s = self._session(tmp_path, b"")
+        result = await tool_onewire_search(session_manager=mgr, session_id=s.session_id)
+        assert result == {"present": False, "method": "search_rom", "count": 0, "devices": []}
+
+    @pytest.mark.asyncio
+    async def test_old_firmware_junk_falls_back_to_read_rom(self, tmp_path):
+        mgr, hw, s = self._session(tmp_path, bytes([0xA5, 0x5A] * 64))
+        rom = self._rom(0x28, bytes(range(1, 7)))
+        hw.onewire_reset.return_value = True
+        hw.onewire_transfer.return_value = list(rom)
+        result = await tool_onewire_search(session_manager=mgr, session_id=s.session_id)
+        assert result["method"] == "read_rom"
+        assert result["family_code"] == "0x28"
+
+    @pytest.mark.asyncio
+    async def test_all_zero_rom_is_not_a_device(self, tmp_path):
+        mgr, hw, s = self._session(tmp_path, bytes(8))
+        hw.onewire_reset.return_value = False
+        result = await tool_onewire_search(session_manager=mgr, session_id=s.session_id)
+        assert result == {"present": False}
+
+    @pytest.mark.asyncio
+    async def test_failed_search_request_falls_back(self, tmp_path):
+        mgr, hw, s = self._session(tmp_path, None)
+        hw.onewire_reset.return_value = False
+        result = await tool_onewire_search(session_manager=mgr, session_id=s.session_id)
+        assert result == {"present": False}
