@@ -27,6 +27,12 @@ try:
     from pybpio.bpio_spi import BPIOSPI
     from pybpio.bpio_i2c import BPIOI2C
     from pybpio.bpio_1wire import BPIO1Wire
+    from tooling.bpio import (
+        ConfigurationResponse,
+        DataResponse,
+        ResponsePacket,
+        ResponsePacketContents,
+    )
 except ImportError:
     # SDK not available -- tests use mocks, but fail fast at runtime
     BPIOClient = None  # type: ignore[assignment, misc]
@@ -34,6 +40,54 @@ except ImportError:
     BPIOSPI = None  # type: ignore[assignment, misc]
     BPIOI2C = None  # type: ignore[assignment, misc]
     BPIO1Wire = None  # type: ignore[assignment, misc]
+    ResponsePacket = None  # type: ignore[assignment]
+
+
+class BPIOError(RuntimeError):
+    """A BPIO2 request failed. The message carries the firmware's reason."""
+
+
+def _capture_responses(client: Any) -> None:
+    """Keep the last raw response on the client so failures can be explained.
+
+    The SDK turns every failure into False/None and only print()s the reason,
+    so wrap send_and_receive and decode the error ourselves.
+    """
+    send = getattr(client, "send_and_receive", None)
+    if send is None or getattr(send, "_bpio_capture", False):
+        return
+
+    def send_and_capture(data: Any) -> Any:
+        client._bpio_last_response = None
+        resp = send(data)
+        client._bpio_last_response = resp
+        return resp
+
+    send_and_capture._bpio_capture = True  # type: ignore[attr-defined]
+    client.send_and_receive = send_and_capture
+
+
+def _response_error(resp: Any) -> str | None:
+    """Error string from a raw BPIO2 response, wherever the firmware put it."""
+    if not resp or ResponsePacket is None:
+        return None
+    try:
+        packet = ResponsePacket.ResponsePacket.GetRootAsResponsePacket(resp, 0)
+        if packet.Error():
+            return packet.Error().decode("utf-8", errors="replace")
+        kinds = ResponsePacketContents.ResponsePacketContents
+        table = {
+            kinds.ConfigurationResponse: ConfigurationResponse.ConfigurationResponse,
+            kinds.DataResponse: DataResponse.DataResponse,
+        }.get(packet.ContentsType())
+        if table is None or packet.Contents() is None:
+            return None
+        contents = table()
+        contents.Init(packet.Contents().Bytes, packet.Contents().Pos)
+        err = contents.Error()
+        return err.decode("utf-8", errors="replace") if err else None
+    except Exception:
+        return None
 
 
 class BusPirateHardware:
@@ -48,6 +102,37 @@ class BusPirateHardware:
         self._active_mode: str | None = None
         self._last_voltage_mv: int = 0
         self._last_current_ma: int = 0
+        _capture_responses(client)
+
+    # -- error handling --
+
+    def _failure(self, what: str) -> BPIOError:
+        resp = getattr(self.client, "_bpio_last_response", None)
+        if not resp:
+            return BPIOError(f"{what}: no response from BusPirate (timeout)")
+        reason = _response_error(resp) or "request failed"
+        return BPIOError(f"{what}: {reason}")
+
+    def _config(self, what: str, **kwargs: Any) -> bool:
+        """Send a ConfigurationRequest; raise BPIOError with the reason on failure.
+
+        Goes to the client directly: the SDK protocol objects refuse
+        (print + None) until their mode is configured, which made PSU and
+        GPIO calls silently do nothing before open_uart/open_spi/etc.
+        """
+        if self.client.configuration_request(**kwargs) is not True:
+            raise self._failure(what)
+        return True
+
+    def _data(self, what: str, result: Any) -> bytes:
+        """Check a data request result: False is a failure, None is no data."""
+        if result is False:
+            raise self._failure(what)
+        return bytes(result) if result else b""
+
+    def _configured(self, what: str, ok: Any) -> None:
+        if not ok:
+            raise self._failure(what)
 
     @property
     def _active_protocol(self) -> Any:
@@ -122,7 +207,7 @@ class BusPirateHardware:
     ) -> None:
         """Configure UART mode on the BusPirate."""
         self._check_mode("uart")
-        self.uart.configure(
+        ok = self.uart.configure(
             speed=speed,
             data_bits=data_bits,
             parity=parity,
@@ -131,6 +216,7 @@ class BusPirateHardware:
             signal_inversion=False,
             async_callback=None,
         )
+        self._configured("configure UART", ok)
         self._active_mode = "uart"
 
     def read(self) -> bytes:
@@ -143,12 +229,12 @@ class BusPirateHardware:
 
     def set_voltage(self, voltage_v: float, current_limit_ma: int) -> bool:
         """Set the power supply voltage and current limit."""
-        proto = self._active_protocol
         voltage_mv = round(voltage_v * 1000)
         self._last_voltage_mv = voltage_mv
         self._last_current_ma = current_limit_ma
-        return proto.set_psu_enable(
-            voltage_mv=voltage_mv, current_ma=current_limit_ma,
+        return self._config(
+            "set voltage", psu_enable=True,
+            psu_set_mv=voltage_mv, psu_set_ma=current_limit_ma,
         )
 
     def set_power(self, enable: bool) -> bool:
@@ -157,17 +243,17 @@ class BusPirateHardware:
         When enabling, re-applies the last configured voltage/current.
         Raises RuntimeError if no voltage was previously configured.
         """
-        proto = self._active_protocol
         if enable:
             if self._last_voltage_mv == 0:
                 raise RuntimeError(
                     "No voltage configured. Call set_voltage() before set_power(True)."
                 )
-            return proto.set_psu_enable(
-                voltage_mv=self._last_voltage_mv,
-                current_ma=self._last_current_ma,
+            return self._config(
+                "power on", psu_enable=True,
+                psu_set_mv=self._last_voltage_mv,
+                psu_set_ma=self._last_current_ma,
             )
-        return proto.set_psu_disable()
+        return self._config("power off", psu_disable=True)
 
     @staticmethod
     def _validate_pin(pin: int) -> None:
@@ -178,9 +264,8 @@ class BusPirateHardware:
     def configure_pin_input(self, pin: int) -> None:
         """Configure a pin as digital input for reading."""
         self._validate_pin(pin)
-        proto = self._active_protocol
         mask = 1 << pin
-        proto.set_io_direction(direction_mask=mask, direction=0)
+        self._config(f"IO{pin} input", io_direction_mask=mask, io_direction=0)
 
     def get_pin_voltages(self) -> list[int]:
         """Read ADC millivolt values for all IO pins."""
@@ -189,17 +274,18 @@ class BusPirateHardware:
     def set_pin_output(self, pin: int, high: bool) -> None:
         """Set a pin as output and drive it high or low."""
         self._validate_pin(pin)
-        proto = self._active_protocol
         mask = 1 << pin
-        proto.set_io_direction(direction_mask=mask, direction=mask)
-        proto.set_io_value(value_mask=mask, value=mask if high else 0)
+        # value first, then direction, so the pin never drives the old level
+        self._config(
+            f"IO{pin} output", io_value_mask=mask, io_value=mask if high else 0,
+        )
+        self._config(f"IO{pin} output", io_direction_mask=mask, io_direction=mask)
 
     def release_pin(self, pin: int) -> None:
         """Release a pin back to input (high-impedance)."""
         self._validate_pin(pin)
-        proto = self._active_protocol
         mask = 1 << pin
-        proto.set_io_direction(direction_mask=mask, direction=0)
+        self._config(f"IO{pin} input", io_direction_mask=mask, io_direction=0)
 
     # -- SPI --
 
@@ -221,26 +307,30 @@ class BusPirateHardware:
             kwargs["psu_enable"] = True
             kwargs["psu_set_mv"] = voltage_mv
             kwargs["psu_set_ma"] = current_ma or 100
-        self.spi.configure(
+        ok = self.spi.configure(
             speed=speed,
             clock_polarity=clock_polarity,
             clock_phase=clock_phase,
             chip_select_idle=chip_select_idle,
             **kwargs,
         )
+        self._configured("configure SPI", ok)
         self._active_mode = "spi"
 
     def spi_transfer(self, write_data: bytes, read_bytes: int = 0) -> bytes:
         """Send/receive data over SPI."""
-        return self.spi.transfer(write_data=write_data, read_bytes=read_bytes)
+        return self._data(
+            "SPI transfer",
+            self.spi.transfer(write_data=write_data, read_bytes=read_bytes),
+        )
 
     def spi_select(self) -> None:
         """Assert chip select (active low)."""
-        return self.spi.select()
+        self._data("SPI select", self.spi.select())
 
     def spi_deselect(self) -> None:
         """Deassert chip select."""
-        return self.spi.deselect()
+        self._data("SPI deselect", self.spi.deselect())
 
     # -- I2C --
 
@@ -260,12 +350,16 @@ class BusPirateHardware:
             kwargs["psu_enable"] = True
             kwargs["psu_set_mv"] = voltage_mv
             kwargs["psu_set_ma"] = current_ma or 100
-        self.i2c.configure(speed=speed, clock_stretch=clock_stretch, **kwargs)
+        ok = self.i2c.configure(speed=speed, clock_stretch=clock_stretch, **kwargs)
+        self._configured("configure I2C", ok)
         self._active_mode = "i2c"
 
     def i2c_transfer(self, write_data: bytes, read_bytes: int = 0) -> bytes:
         """Send/receive data over I2C."""
-        return self.i2c.transfer(write_data=write_data, read_bytes=read_bytes)
+        return self._data(
+            "I2C transfer",
+            self.i2c.transfer(write_data=write_data, read_bytes=read_bytes),
+        )
 
     def i2c_scan(self, start_addr: int = 0x00, end_addr: int = 0x7F) -> list:
         """Scan the I2C bus for devices.
@@ -296,16 +390,29 @@ class BusPirateHardware:
             kwargs["psu_enable"] = True
             kwargs["psu_set_mv"] = voltage_mv
             kwargs["psu_set_ma"] = current_ma or 100
-        self.onewire.configure(**kwargs)
+        ok = self.onewire.configure(**kwargs)
+        self._configured("configure 1-Wire", ok)
         self._active_mode = "1wire"
 
     def onewire_reset(self) -> Any:
-        """Send a 1-Wire bus reset pulse."""
-        return self.onewire.reset()
+        """Send a 1-Wire bus reset pulse. True if a device answered.
+
+        The firmware reports "no presence pulse" as a failed request, so a
+        failure with a response means no device; no response at all is an
+        error.
+        """
+        if self.onewire.reset() is not False:
+            return True
+        if not getattr(self.client, "_bpio_last_response", None):
+            raise self._failure("1-Wire reset")
+        return False
 
     def onewire_transfer(self, write_data: bytes, read_bytes: int = 0) -> bytes:
         """Send/receive data over 1-Wire."""
-        return self.onewire.transfer(write_data=write_data, read_bytes=read_bytes)
+        return self._data(
+            "1-Wire transfer",
+            self.onewire.transfer(write_data=write_data, read_bytes=read_bytes),
+        )
 
     @staticmethod
     def find_terminal_port() -> str | None:
@@ -318,10 +425,9 @@ class BusPirateHardware:
 
     def disconnect(self) -> None:
         """Disable PSU and clean up the connection."""
-        proto = self._active_protocol
-        if proto is not None:
+        if self.client is not None:
             try:
-                proto.set_psu_disable()
+                self.client.configuration_request(psu_disable=True)
             except Exception:
                 pass  # best effort -- hardware may already be gone
         self.client = None

@@ -99,49 +99,37 @@ class TestUARTOperations:
 
 
 class TestPowerSupply:
-    def test_set_voltage(self):
-        with patch("buspirate_mcp.hardware.BPIOClient"), \
-             patch("buspirate_mcp.hardware.BPIOUART") as mock_uart_cls:
-            mock_uart = MagicMock()
-            mock_uart.set_psu_enable.return_value = True
-            mock_uart_cls.return_value = mock_uart
+    """PSU requests go straight to the client: they need no configured mode."""
 
-            hw = BusPirateHardware.connect("/dev/ttyACM1")
-            result = hw.set_voltage(3.3, 300)
-            mock_uart.set_psu_enable.assert_called_once_with(
-                voltage_mv=3300, current_ma=300,
-            )
-            assert result is True
+    def _hw(self):
+        client = MagicMock()
+        client.configuration_request.return_value = True
+        return BusPirateHardware(client=client, uart=MagicMock()), client
+
+    def test_set_voltage(self):
+        hw, client = self._hw()
+        assert hw.set_voltage(3.3, 300) is True
+        client.configuration_request.assert_called_once_with(
+            psu_enable=True, psu_set_mv=3300, psu_set_ma=300,
+        )
 
     def test_set_voltage_uses_round(self):
-        with patch("buspirate_mcp.hardware.BPIOClient"), \
-             patch("buspirate_mcp.hardware.BPIOUART") as mock_uart_cls:
-            mock_uart = MagicMock()
-            mock_uart.set_psu_enable.return_value = True
-            mock_uart_cls.return_value = mock_uart
-
-            hw = BusPirateHardware.connect("/dev/ttyACM1")
-            hw.set_voltage(2.3, 100)
-            # round(2.3 * 1000) = 2300, not int(2.3 * 1000) = 2299
-            mock_uart.set_psu_enable.assert_called_once_with(
-                voltage_mv=2300, current_ma=100,
-            )
+        hw, client = self._hw()
+        hw.set_voltage(2.3, 100)
+        # round(2.3 * 1000) = 2300, not int(2.3 * 1000) = 2299
+        assert client.configuration_request.call_args.kwargs["psu_set_mv"] == 2300
 
     def test_set_power_on_uses_last_voltage(self):
-        with patch("buspirate_mcp.hardware.BPIOClient"), \
-             patch("buspirate_mcp.hardware.BPIOUART") as mock_uart_cls:
-            mock_uart = MagicMock()
-            mock_uart.set_psu_enable.return_value = True
-            mock_uart.set_psu_disable.return_value = True
-            mock_uart_cls.return_value = mock_uart
-
-            hw = BusPirateHardware.connect("/dev/ttyACM1")
-            hw.set_voltage(1.8, 100)
-            hw.set_power(False)
-            hw.set_power(True)
-            # Should re-apply 1.8V, not SDK default 3.3V
-            calls = mock_uart.set_psu_enable.call_args_list
-            assert calls[-1].kwargs == {"voltage_mv": 1800, "current_ma": 100}
+        hw, client = self._hw()
+        hw.set_voltage(1.8, 100)
+        hw.set_power(False)
+        hw.set_power(True)
+        # Should re-apply 1.8V, not SDK default 3.3V
+        calls = client.configuration_request.call_args_list
+        assert calls[1].kwargs == {"psu_disable": True}
+        assert calls[-1].kwargs == {
+            "psu_enable": True, "psu_set_mv": 1800, "psu_set_ma": 100,
+        }
 
     def test_set_power_on_without_voltage_raises(self):
         with patch("buspirate_mcp.hardware.BPIOClient"), \
@@ -173,8 +161,9 @@ class TestDisconnect:
             mock_uart_cls.return_value = mock_uart
 
             hw = BusPirateHardware.connect("/dev/ttyACM1")
+            client = hw.client
             hw.disconnect()
-            mock_uart.set_psu_disable.assert_called_once()
+            client.configuration_request.assert_called_once_with(psu_disable=True)
             assert hw.client is None
             assert hw.uart is None
 
@@ -263,15 +252,16 @@ class TestModeTracking:
         hw._active_mode = "1wire"
         assert hw._active_protocol is hw.onewire
 
-    def test_psu_uses_active_protocol(self):
+    def test_psu_does_not_depend_on_active_protocol(self):
         hw = self._make_hw()
+        hw.client.configuration_request.return_value = True
         mock_spi = MagicMock()
-        mock_spi.set_psu_enable.return_value = True
         hw.spi = mock_spi
         hw._active_mode = "spi"
         hw.set_voltage(3.3, 300)
-        mock_spi.set_psu_enable.assert_called_once_with(
-            voltage_mv=3300, current_ma=300,
+        mock_spi.set_psu_enable.assert_not_called()
+        hw.client.configuration_request.assert_called_once_with(
+            psu_enable=True, psu_set_mv=3300, psu_set_ma=300,
         )
 
 
@@ -467,3 +457,84 @@ class TestOneWireOperations:
         hw._active_mode = "spi"
         with pytest.raises(RuntimeError, match="Mode 'spi' is active"):
             hw.configure_1wire()
+
+
+def _config_response(error=None):
+    """Raw BPIO2 ConfigurationResponse bytes, as the firmware sends them."""
+    import flatbuffers
+    from tooling.bpio import (
+        ConfigurationResponse, ResponsePacket, ResponsePacketContents,
+    )
+    b = flatbuffers.Builder(64)
+    err = b.CreateString(error) if error else None
+    ConfigurationResponse.Start(b)
+    if err:
+        ConfigurationResponse.AddError(b, err)
+    contents = ConfigurationResponse.End(b)
+    ResponsePacket.Start(b)
+    ResponsePacket.AddContentsType(
+        b, ResponsePacketContents.ResponsePacketContents.ConfigurationResponse,
+    )
+    ResponsePacket.AddContents(b, contents)
+    b.Finish(ResponsePacket.End(b))
+    return bytes(b.Output())
+
+
+class TestErrorPropagation:
+    """Failures raise BPIOError with the firmware's reason, not False/None."""
+
+    def _hw(self, response):
+        client = MagicMock()
+
+        def send_and_receive(data):
+            return response
+
+        client.send_and_receive = send_and_receive
+
+        def configuration_request(**kwargs):
+            # what the SDK does: send, then collapse any error to False
+            resp = client.send_and_receive(b"req")
+            return bool(resp) and b"out of range" not in resp
+
+        client.configuration_request.side_effect = configuration_request
+        return BusPirateHardware(client=client, uart=MagicMock())
+
+    def test_firmware_error_string_is_raised(self):
+        hw = self._hw(_config_response("PSU Voltage out of range (800-5000 mV)"))
+        from buspirate_mcp.hardware import BPIOError
+        with pytest.raises(BPIOError, match="set voltage: PSU Voltage out of range"):
+            hw.set_voltage(0.5, 100)
+
+    def test_no_response_is_reported_as_timeout(self):
+        hw = self._hw(False)
+        from buspirate_mcp.hardware import BPIOError
+        with pytest.raises(BPIOError, match="no response from BusPirate"):
+            hw.set_power(False)
+
+    def test_failed_transfer_raises_instead_of_returning_false(self):
+        hw = self._hw(None)
+        hw.i2c = MagicMock()
+        hw.i2c.transfer.return_value = False
+        from buspirate_mcp.hardware import BPIOError
+        with pytest.raises(BPIOError, match="I2C transfer"):
+            hw.i2c_transfer([0xA0], 1)
+
+    def test_transfer_without_read_data_returns_empty_bytes(self):
+        hw = self._hw(None)
+        hw.spi = MagicMock()
+        hw.spi.transfer.return_value = None
+        assert hw.spi_transfer([0x06], 0) == b""
+
+    def test_onewire_reset_without_presence_is_false(self):
+        hw = self._hw(_config_response())  # a response arrived
+        hw.onewire = MagicMock()
+        hw.onewire.reset.return_value = False
+        hw.client._bpio_last_response = b"something"
+        assert hw.onewire_reset() is False
+
+    def test_configure_failure_raises(self):
+        hw = self._hw(None)
+        hw.uart.configure.return_value = False
+        from buspirate_mcp.hardware import BPIOError
+        with pytest.raises(BPIOError, match="configure UART"):
+            hw.configure_uart(115200)
