@@ -343,7 +343,7 @@ class TestReadFlash:
     async def test_returns_error_when_esptool_missing(self, tmp_path):
         mock_hw = MagicMock()
         output = tmp_path / "dump.bin"
-        with patch("buspirate_mcp.tools._enter_bridge_mode", return_value=True), \
+        with patch("buspirate_mcp.tools._enter_bridge_mode", return_value=(True, {})), \
              patch("buspirate_mcp.tools.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("esptool not found")
             result = await tool_read_flash(
@@ -361,7 +361,7 @@ class TestReadFlash:
         mock_hw = MagicMock()
         output = tmp_path / "dump.bin"
         output.write_bytes(b'\xff' * 4096)
-        with patch("buspirate_mcp.tools._enter_bridge_mode", return_value=False), \
+        with patch("buspirate_mcp.tools._enter_bridge_mode", return_value=(False, {})), \
              patch("buspirate_mcp.tools.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="Read 4096 bytes", stderr="",
@@ -379,7 +379,7 @@ class TestReadFlash:
     async def test_success_returns_output_path(self, tmp_path):
         mock_hw = MagicMock()
         output = tmp_path / "subdir" / "dump.bin"
-        with patch("buspirate_mcp.tools._enter_bridge_mode", return_value=True), \
+        with patch("buspirate_mcp.tools._enter_bridge_mode", return_value=(True, {})), \
              patch("buspirate_mcp.tools.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0, stdout="Read 4096 bytes", stderr="",
@@ -394,6 +394,114 @@ class TestReadFlash:
             assert result["status"] == "success"
             # Path traversal prevention: directory components stripped
             assert Path(result["output_path"]).name == "dump.bin"
+
+
+class TestReadFlashBridge:
+    """Bridge options, auto-reset and leaving the bridge."""
+
+    @pytest.mark.asyncio
+    async def test_leaves_bridge_and_reports_bpio_back(self, tmp_path):
+        hw = MagicMock()
+        hw.ping.return_value = True
+        with patch("buspirate_mcp.tools._enter_bridge_mode",
+                   return_value=(True, {"follow_baud": True})), \
+             patch("buspirate_mcp.tools._exit_bridge_mode") as exit_bridge, \
+             patch("buspirate_mcp.tools.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            result = await tool_read_flash(
+                hw, "/dev/ttyACM0", 0, 4096, str(tmp_path / "d.bin"),
+            )
+        exit_bridge.assert_called_once_with("/dev/ttyACM0")
+        assert result["bridge_exited"] is True
+        assert "cleanup" not in result
+
+    @pytest.mark.asyncio
+    async def test_old_firmware_still_gets_button_hint(self, tmp_path):
+        hw = MagicMock()
+        hw.ping.side_effect = RuntimeError("timeout")
+        with patch("buspirate_mcp.tools._enter_bridge_mode", return_value=(True, {})), \
+             patch("buspirate_mcp.tools._exit_bridge_mode"), \
+             patch("buspirate_mcp.tools.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            result = await tool_read_flash(
+                hw, "/dev/ttyACM0", 0, 4096, str(tmp_path / "d.bin"),
+            )
+        assert result["bridge_exited"] is False
+        assert "button" in result["cleanup"]
+
+    @pytest.mark.asyncio
+    async def test_bridge_left_on_esptool_failure(self, tmp_path):
+        hw = MagicMock()
+        with patch("buspirate_mcp.tools._enter_bridge_mode", return_value=(True, {})), \
+             patch("buspirate_mcp.tools._exit_bridge_mode") as exit_bridge, \
+             patch("buspirate_mcp.tools.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=2, stdout="", stderr="fail")
+            result = await tool_read_flash(
+                hw, "/dev/ttyACM0", 0, 4096, str(tmp_path / "d.bin"),
+            )
+        assert result["error"] == "esptool failed"
+        exit_bridge.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_autoreset_uses_bridge_pins_and_esptool_reset(self, tmp_path):
+        hw = MagicMock()
+        with patch("buspirate_mcp.tools._enter_bridge_mode",
+                   return_value=(True, {"autoreset": True})) as enter, \
+             patch("buspirate_mcp.tools._exit_bridge_mode"), \
+             patch("buspirate_mcp.tools.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            await tool_read_flash(
+                hw, "/dev/ttyACM0", 0, 4096, str(tmp_path / "d.bin"),
+                boot_pin=1, reset_pin=0, autoreset=True,
+            )
+        enter.assert_called_once_with("/dev/ttyACM0", reset_pin=0, boot_pin=1)
+        hw.set_pin_output.assert_not_called()  # no BPIO2 GPIO dance
+        cmd = mock_run.call_args.args[0]
+        assert cmd[cmd.index("--before") + 1] == "default-reset"
+        assert cmd[cmd.index("--after") + 1] == "hard-reset"
+
+    @pytest.mark.asyncio
+    async def test_autoreset_refused_on_old_firmware(self, tmp_path):
+        hw = MagicMock()
+        with patch("buspirate_mcp.tools._enter_bridge_mode",
+                   return_value=(True, {"autoreset": False})), \
+             patch("buspirate_mcp.tools._exit_bridge_mode") as exit_bridge, \
+             patch("buspirate_mcp.tools.subprocess.run") as mock_run:
+            result = await tool_read_flash(
+                hw, "/dev/ttyACM0", 0, 4096, str(tmp_path / "d.bin"),
+                boot_pin=1, reset_pin=0, autoreset=True,
+            )
+        assert "auto-reset" in result["error"]
+        mock_run.assert_not_called()
+        exit_bridge.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_autoreset_needs_pins(self, tmp_path):
+        result = await tool_read_flash(
+            MagicMock(), "/dev/ttyACM0", 0, 4096, str(tmp_path / "d.bin"),
+            autoreset=True,
+        )
+        assert "needs boot_pin and reset_pin" in result["error"]
+
+
+class TestBridgeOptionDetection:
+    def _ser(self, help_text):
+        ser = MagicMock()
+        ser.in_waiting = len(help_text)
+        ser.read.return_value = help_text.encode()
+        return ser
+
+    def test_new_firmware(self):
+        from buspirate_mcp.tools import _bridge_supported_options
+        text = ("options:\r\n  -t, --toolbar  x\r\n  -b, --baud  y\r\n"
+                "  -r, --reset <IO>  z\r\n  -g, --boot <IO>  w\r\n")
+        with patch("buspirate_mcp.tools.time.sleep"):
+            assert _bridge_supported_options(self._ser(text)) == {"baud", "reset", "boot"}
+
+    def test_old_firmware(self):
+        from buspirate_mcp.tools import _bridge_supported_options
+        with patch("buspirate_mcp.tools.time.sleep"):
+            assert _bridge_supported_options(self._ser("  -t, --toolbar  x\r\n")) == set()
 
 
 class TestOpen1Wire:

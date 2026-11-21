@@ -322,6 +322,10 @@ class BusPirateHardware:
         key = "pullup_enable" if enable else "pullup_disable"
         return self._config(f"pull-up {'enable' if enable else 'disable'}", **{key: True})
 
+    def ping(self) -> bool:
+        """True if the BusPirate answers a BPIO2 status request."""
+        return bool(self.client.status_request())
+
     def get_pin_voltages(self) -> list[int]:
         """Read ADC millivolt values for all IO pins."""
         return self._active_protocol.get_adc_mv()

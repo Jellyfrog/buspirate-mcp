@@ -134,7 +134,7 @@ The `open_uart` tool accepts an optional `engagement_path` parameter. When provi
 
 ### Known limitations
 
-- **Bridge mode exit:** after flash dump operations, bridge mode stays active. Press the physical BP6 button or USB-replug to exit.
+- **Bridge mode exit:** `read_flash` leaves the bridge with a serial BREAK. That needs firmware with the bridge exit fix; on older firmware press the physical BP6 button or USB-replug (`bridge_exited` in the result says which happened).
 - **Dual-port operation:** BPIO2 (binary port) and bridge mode (terminal port) cannot operate simultaneously.
 - **Baud scan timing:** fast-booting targets may finish output before the scan reaches the correct rate.
 - **Port numbering:** the binary port number may change after USB replug (ACM1 -> ACM2). The server finds the ports by USB VID:PID (1209:7331) and interface number, so this does not matter.

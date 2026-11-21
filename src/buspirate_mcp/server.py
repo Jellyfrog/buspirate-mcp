@@ -323,7 +323,8 @@ TOOL_DEFINITIONS = [
             "Optionally enters download mode first. Requires esptool installed. "
             "[allowed-write] [Duration: very-slow (~3-5 min for 1-2 MiB at 460800 baud; "
             "larger images proportionally longer). Background-dispatch required. "
-            "Bridge mode persists after dump -- press BP6 button or USB-replug to exit.]"
+            "The bridge is left with a serial BREAK afterwards; firmware without the bridge "
+            "exit fix still needs the BP6 button or a USB replug (see bridge_exited).]"
         ),
         inputSchema={
             "type": "object",
@@ -350,7 +351,20 @@ TOOL_DEFINITIONS = [
                 },
                 "baud": {
                     "type": "integer", "default": 115200,
-                    "description": "Baud rate for flash read (115200 or 460800 recommended)",
+                    "description": (
+                        "Baud rate for flash read. With firmware whose bridge "
+                        "follows the host baud rate (bridge -b), esptool switches "
+                        "to this rate itself; otherwise keep 115200 or 460800."
+                    ),
+                },
+                "autoreset": {
+                    "type": "boolean", "default": False,
+                    "description": (
+                        "Have the firmware bridge drive reset_pin (EN) and boot_pin "
+                        "(GPIO0) from esptool's DTR/RTS (bridge -r/-g), so esptool "
+                        "resets the target into its bootloader and back. Needs both "
+                        "pins and firmware with bridge auto-reset."
+                    ),
                 },
             },
             "required": ["size", "output_path"],
@@ -949,6 +963,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     boot_pin=arguments.get("boot_pin", -1),
                     reset_pin=arguments.get("reset_pin", -1),
                     baud=arguments.get("baud", 115200),
+                    autoreset=arguments.get("autoreset", False),
                 )
 
         # --- SPI ---
