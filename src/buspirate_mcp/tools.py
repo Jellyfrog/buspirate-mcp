@@ -838,17 +838,69 @@ async def tool_open_1wire(
     }
 
 
+ONEWIRE_SEARCH_MAX_DEVICES = 16
+
+
+def _onewire_describe(rom: bytes) -> dict[str, Any]:
+    family_code = rom[0]
+    return {
+        "family_code": f"0x{family_code:02X}",
+        "family_name": ONEWIRE_FAMILIES.get(family_code, f"Unknown (0x{family_code:02X})"),
+        "serial": rom[1:7].hex().upper(),
+        "crc_valid": _onewire_crc8(rom[:7]) == rom[7],
+        "rom_code": rom.hex().upper(),
+    }
+
+
+def _onewire_search_all(session: Any) -> dict[str, Any] | None:
+    """All devices via the firmware's Search ROM, or None to fall back.
+
+    Accepted only if every ROM is 8 bytes, passes its CRC and is not all
+    zeros (a bus held low reads as zeros, whose CRC is also zero). Older
+    firmware without the search returns raw reads that fail this check.
+    """
+    raw = session.hardware.onewire_search_rom(ONEWIRE_SEARCH_MAX_DEVICES)
+    if not isinstance(raw, (bytes, bytearray)) or len(raw) % 8:
+        return None
+    roms = [bytes(raw[i:i + 8]) for i in range(0, len(raw), 8)]
+    if any(_onewire_crc8(r[:7]) != r[7] or not any(r) for r in roms):
+        return None
+    devices = [_onewire_describe(r) for r in roms]
+    session.log_transaction(
+        operation="SEARCH_ROM",
+        write_hex="F0",
+        read_hex=bytes(raw).hex().upper(),
+        metadata={"count": len(devices)},
+    )
+    result: dict[str, Any] = {
+        "present": bool(devices),
+        "method": "search_rom",
+        "count": len(devices),
+        "devices": devices,
+    }
+    if devices:
+        result.update(devices[0])  # first device at top level, as before
+    if len(devices) == ONEWIRE_SEARCH_MAX_DEVICES:
+        result["truncated"] = True
+    return result
+
+
 async def tool_onewire_search(
     session_manager: SessionManager,
     session_id: str,
 ) -> dict[str, Any]:
-    """Search for a device on the 1-Wire bus using Read ROM (0x33).
+    """Enumerate devices on the 1-Wire bus.
 
-    Works when exactly one device is present. Returns family code, serial,
-    CRC validity, and full ROM code. Returns {"present": False} if no device
-    asserts a presence pulse.
+    With firmware that has BPIO2 1-Wire Search ROM, every device on the bus
+    is returned in "devices" (the first one also at top level). Otherwise
+    falls back to Read ROM (0x33), which works when exactly one device is
+    present. Returns {"present": False} if no device asserts a presence pulse.
     """
     session = session_manager.get(session_id)
+
+    found = _onewire_search_all(session)
+    if found is not None:
+        return found
 
     present = session.hardware.onewire_reset()
     if not present:
@@ -885,6 +937,7 @@ async def tool_onewire_search(
 
     return {
         "present": True,
+        "method": "read_rom",
         "family_code": f"0x{family_code:02X}",
         "family_name": family_name,
         "serial": serial_hex,

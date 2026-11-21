@@ -646,10 +646,11 @@ TOOL_DEFINITIONS = [
     Tool(
         name="onewire_search",
         description=(
-            "Search for a device on the 1-Wire bus using Read ROM (0x33). "
-            "Returns family code, serial number, and CRC validity. "
-            "Works when exactly one device is present. "
-            "[read-only] [Duration: fast (~1-3 s -- Read ROM sequence).]"
+            "Enumerate 1-Wire devices. With firmware that has 1-Wire Search "
+            "ROM, returns every device on the bus in devices (family code, "
+            "serial, CRC), up to 16. Otherwise falls back to Read ROM (0x33), "
+            "which needs exactly one device; method says which was used. "
+            "[read-only] [Duration: fast (~1-3 s).]"
         ),
         inputSchema={
             "type": "object",

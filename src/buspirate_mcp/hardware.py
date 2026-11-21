@@ -466,6 +466,22 @@ class BusPirateHardware:
             raise self._failure("1-Wire reset")
         return False
 
+    def onewire_search_rom(self, max_devices: int = 16) -> bytes | None:
+        """Enumerate the 1-Wire bus with the firmware's Search ROM.
+
+        Firmware with BPIO2 1-Wire search runs the whole search when a data
+        request has start_alt set and writes the single byte 0xF0, and returns
+        8 bytes per device. Returns those bytes (b"" when no device answered),
+        or None when the request failed. Older firmware sends the byte raw and
+        returns whatever it reads, so callers must check every ROM's CRC.
+        """
+        result = self.client.data_request(
+            start_alt=True, data_write=[0xF0], bytes_read=8 * max_devices,
+        )
+        if result is False:
+            return None
+        return bytes(result) if result else b""
+
     def onewire_transfer(self, write_data: bytes, read_bytes: int = 0) -> bytes:
         """Send/receive data over 1-Wire."""
         return self._data(

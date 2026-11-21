@@ -62,7 +62,7 @@ BP6 UART mode uses IO4 (TX->) and IO5 (RX<-). The BP display is the authoritativ
 
 - Pin mapping: IO4=DQ (data line)
 - Pullup enabled by default (required for 1-Wire)
-- Read ROM (0x33) supports single-device identification. Multi-device search not implemented in SDK.
+- `onewire_search` uses the firmware's Search ROM when available (BPIO2 data request with start_alt and the single byte 0xF0, 8 bytes per device back) and lists every device. Older firmware returns raw reads instead, which fail the ROM CRC check, and the tool falls back to Read ROM (0x33, single device only).
 - CRC-8 validation (Dallas polynomial 0x8C) on ROM codes
 
 ### Power supply
