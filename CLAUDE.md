@@ -20,6 +20,8 @@ buspirate-mcp (server.py)
 BusPirate 6 -> Target Device
 ```
 
+Protocol: MCP 2026-07-28 via the `mcp` SDK 2.x low-level `Server`, which also serves legacy `initialize` clients on stdio. `call_tool(name, arguments)` in server.py is the dispatcher and returns one JSON text block; `_on_call_tool` wraps it as a `CallToolResult` (`structuredContent`, `isError` when the reply has an `error` or `confirmation_required`). Unknown tools raise `MCPError(-32602)`. Log to stderr only; stdout belongs to the protocol (the SDK's `stdio_server` points fd 1 at stderr while serving).
+
 Only `hardware.py` imports from the BPIO2 SDK. Everything else talks to `hardware.py`. This makes mocking trivial for tests.
 
 ## Safety Model

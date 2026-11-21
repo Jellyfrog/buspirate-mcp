@@ -16,6 +16,21 @@ Built for use with Claude Code but works with any MCP client.
 - **Logic analyzer:** follow-along capture at 75 MHz on all 8 IO pins with protocol identification
 - **Engagement logging:** per-protocol logs (UART text, SPI/I2C/1-Wire JSONL), per-engagement folders
 
+## Protocol
+
+Speaks MCP 2026-07-28 (stateless: no handshake, protocol version and client
+capabilities in each request's `_meta`, `server/discover`). Clients that still
+use the `initialize` handshake (protocol 2024-11-05 to 2025-11-25) keep
+working: the server answers both on stdio.
+
+- Tool results carry the JSON reply as `structuredContent` and as a text block.
+- A tool that fails, or an approval-write call without `_confirmed=true`,
+  returns `isError: true` with the reason. An unknown tool name is a
+  JSON-RPC `-32602` error.
+- Logs go to stderr (`BUSPIRATE_MCP_LOG_LEVEL`, default `INFO`); every tool
+  call is logged with its safety tier. MCP's logging feature is not used
+  (deprecated in 2026-07-28).
+
 ## Requirements
 
 - Python 3.11+
