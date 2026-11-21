@@ -151,3 +151,12 @@ async def test_unknown_tool_raises_invalid_params():
     with pytest.raises(MCPError) as exc:
         await server._on_call_tool(None, params)
     assert exc.value.error.code == -32602
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["la_prepare", "la_cleanup"])
+async def test_la_tools_drop_cached_hardware(tool_name):
+    """After FALA takes ACM1 (or gives it back), BPIO2 must reconnect."""
+    server._hardware = MagicMock()
+    await server.call_tool(tool_name, TOOL_ARGS[tool_name])
+    assert server._hardware is None

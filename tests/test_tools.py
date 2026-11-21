@@ -1899,3 +1899,26 @@ class TestOneWireSearchAll:
         hw.onewire_reset.return_value = False
         result = await tool_onewire_search(session_manager=mgr, session_id=s.session_id)
         assert result == {"present": False}
+
+
+class TestLaPrepareReleasesBpio:
+    @pytest.mark.asyncio
+    async def test_closes_bpio_before_fala_opens_acm1(self, tmp_path):
+        from buspirate_mcp.tools import tool_la_prepare
+        order = []
+        hw = MagicMock()
+        hw._active_mode = None
+        hw.find_terminal_port.return_value = "/dev/ttyACM0"
+        hw.list_devices.return_value = [
+            {"path": "/dev/ttyACM0", "role": "terminal"},
+            {"path": "/dev/ttyACM1", "role": "binary"},
+        ]
+        hw.close.side_effect = lambda: order.append("close")
+        fala = MagicMock()
+        fala.activate.side_effect = lambda *a: order.append("activate") or {}
+        with patch("buspirate_mcp.tools.FALASession", return_value=fala):
+            result = await tool_la_prepare(
+                SessionManager(engagements_dir=tmp_path), hw, "t", "spi",
+            )
+        assert "session_id" in result
+        assert order == ["close", "activate"]

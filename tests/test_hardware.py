@@ -612,3 +612,14 @@ class TestOneWireSearchRom:
     def test_failed_request_is_none(self):
         hw, _ = self._hw(False)
         assert hw.onewire_search_rom() is None
+
+
+class TestClose:
+    def test_close_releases_port_without_touching_psu(self):
+        client = MagicMock()
+        hw = BusPirateHardware(client=client, uart=MagicMock())
+        hw.close()
+        client.close.assert_called_once()
+        client.configuration_request.assert_not_called()
+        assert hw.client is None
+        hw.close()  # idempotent

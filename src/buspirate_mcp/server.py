@@ -865,6 +865,9 @@ async def _on_call_tool(ctx, params) -> CallToolResult:
 
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Run one tool and return its JSON reply as a single text block."""
+    # la_prepare / la_cleanup drop the cached connection so the next BPIO2
+    # call reconnects; without this the assignments below only set a local.
+    global _hardware
     if name in {"open_uart", "open_spi", "open_i2c", "open_1wire", "la_prepare"} and "project_path" in arguments:
         return [TextContent(type="text", text=json.dumps(
             {"error": "project_path was renamed to engagement_path in v0.3; "

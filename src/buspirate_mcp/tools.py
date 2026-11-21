@@ -1630,6 +1630,10 @@ async def tool_la_prepare(
         if fala_port is None:
             return {"error": "FALA port not found"}
 
+        # FALA and BPIO2 share ACM1. Close the BPIO2 client first: its reader
+        # thread would otherwise keep reading the port and take FALA's data.
+        hardware.close()
+
         fala = FALASession(terminal_port, fala_port)
         result = fala.activate(protocol, protocol_config)
 
