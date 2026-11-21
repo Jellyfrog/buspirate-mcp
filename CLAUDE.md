@@ -103,7 +103,7 @@ The BP6 exposes two USB CDC serial ports:
 - ACM0: text terminal (VT100), also used for UART bridge mode
 - ACM1: binary protocol (BPIO2)
 
-The binary port number may change after USB replug (ACM1 -> ACM2 etc). The MCP server auto-detects the correct port.
+The binary port number may change after USB replug (ACM1 -> ACM2 etc). The MCP server matches ports by USB VID:PID (1209:7331) and takes the role from the USB interface number (0 = terminal, 2 = binary), falling back to ACM order only when no USB metadata is available.
 
 User must be in the `dialout` group for serial access. A new shell or re-login is required after `usermod -aG dialout $USER`.
 

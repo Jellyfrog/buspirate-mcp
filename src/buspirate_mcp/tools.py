@@ -1302,13 +1302,15 @@ async def tool_la_prepare(
         if terminal_port is None:
             return {"error": "Terminal port not found"}
 
-        # Find the binary/FALA port (the other port)
+        # Find the binary/FALA port: the one marked binary, else the other port
         devices = hardware.list_devices()
-        fala_port = None
-        for d in devices:
-            if d["path"] != terminal_port:
-                fala_port = d["path"]
-                break
+        fala_port = next(
+            (d["path"] for d in devices if d["role"] == "binary"), None,
+        )
+        if fala_port is None:
+            fala_port = next(
+                (d["path"] for d in devices if d["path"] != terminal_port), None,
+            )
         if fala_port is None:
             return {"error": "FALA port not found"}
 

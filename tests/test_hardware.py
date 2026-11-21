@@ -9,6 +9,13 @@ from buspirate_mcp.hardware import BusPirateHardware
 
 
 class TestListDevices:
+    """Fallback path: no USB metadata, roles guessed from ACM order."""
+
+    @pytest.fixture(autouse=True)
+    def _no_usb_metadata(self):
+        with patch("buspirate_mcp.hardware._usb_ports", return_value=[]):
+            yield
+
     def test_finds_acm_devices(self, tmp_path):
         with patch("buspirate_mcp.hardware.glob") as mock_glob:
             mock_glob.return_value = ["/dev/ttyACM0", "/dev/ttyACM1"]
@@ -35,6 +42,51 @@ class TestListDevices:
             mock_glob.return_value = []
             devices = BusPirateHardware.list_devices()
             assert devices == []
+
+
+def _port(device, vid, pid, location, serial="ABC123"):
+    p = MagicMock()
+    p.device, p.vid, p.pid, p.location, p.serial_number = (
+        device, vid, pid, location, serial,
+    )
+    return p
+
+
+class TestListDevicesUsb:
+    def test_roles_from_interface_number_not_order(self):
+        # binary port enumerated with a lower ACM number than the terminal
+        ports = [
+            _port("/dev/ttyACM3", 0x1209, 0x7331, "1-2:1.0"),
+            _port("/dev/ttyACM2", 0x1209, 0x7331, "1-2:1.2"),
+        ]
+        with patch("serial.tools.list_ports.comports", return_value=ports):
+            devices = BusPirateHardware.list_devices()
+        assert devices == [
+            {"path": "/dev/ttyACM2", "role": "binary", "serial_number": "ABC123"},
+            {"path": "/dev/ttyACM3", "role": "terminal", "serial_number": "ABC123"},
+        ]
+
+    def test_ignores_other_usb_serial_devices(self):
+        ports = [
+            _port("/dev/ttyACM0", 0x2341, 0x0043, "1-1:1.0"),  # some other board
+            _port("/dev/ttyACM1", 0x1209, 0x7331, "1-2:1.0"),
+            _port("/dev/ttyACM2", 0x1209, 0x7331, "1-2:1.2"),
+        ]
+        with patch("serial.tools.list_ports.comports", return_value=ports):
+            devices = BusPirateHardware.list_devices()
+        assert [d["path"] for d in devices] == ["/dev/ttyACM1", "/dev/ttyACM2"]
+
+    def test_unknown_interface_marked_unknown(self):
+        ports = [_port("/dev/ttyACM0", 0x1209, 0x7331, None)]
+        with patch("serial.tools.list_ports.comports", return_value=ports):
+            assert BusPirateHardware.list_devices()[0]["role"] == "unknown"
+
+    def test_falls_back_to_acm_order_without_buspirate(self):
+        with patch("serial.tools.list_ports.comports", return_value=[]), \
+             patch("buspirate_mcp.hardware.glob",
+                   return_value=["/dev/ttyACM0", "/dev/ttyACM1"]):
+            devices = BusPirateHardware.list_devices()
+        assert [d["role"] for d in devices] == ["terminal", "binary"]
 
 
 class TestConnect:

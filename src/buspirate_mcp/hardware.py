@@ -36,6 +36,39 @@ except ImportError:
     BPIO1Wire = None  # type: ignore[assignment, misc]
 
 
+# pid.codes VID:PID for Bus Pirate 5/6/7 (CDC) and its logic analyzer USB config
+BUSPIRATE_USB_IDS = {(0x1209, 0x7331), (0x1209, 0x7332)}
+_INTERFACE_ROLES = {0: "terminal", 2: "binary"}
+
+
+def _interface_number(location: str | None) -> int | None:
+    """USB interface number from a pyserial location like '1-2.3:1.2'."""
+    if not location or ":" not in location:
+        return None
+    try:
+        return int(location.rsplit(".", 1)[-1])
+    except ValueError:
+        return None
+
+
+def _usb_ports() -> list[dict[str, str]]:
+    """Bus Pirate serial ports found by USB VID:PID, sorted by path."""
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return []
+    devices = []
+    for port in list_ports.comports():
+        if (port.vid, port.pid) not in BUSPIRATE_USB_IDS:
+            continue
+        role = _INTERFACE_ROLES.get(_interface_number(port.location), "unknown")
+        device = {"path": port.device, "role": role}
+        if port.serial_number:
+            device["serial_number"] = port.serial_number
+        devices.append(device)
+    return sorted(devices, key=lambda d: d["path"])
+
+
 class BusPirateHardware:
     """Wraps a single BusPirate 6 connection."""
 
@@ -85,9 +118,16 @@ class BusPirateHardware:
     def list_devices() -> list[dict[str, str]]:
         """Find BusPirate devices on USB CDC serial ports.
 
-        BP6 exposes two USB CDC ports: first is the text terminal,
-        second is the binary protocol (BPIO2). We identify by order.
+        BP5/6/7 expose two CDC ports: interface 0 is the text terminal,
+        interface 2 is the binary protocol (BPIO2/FALA). Ports are matched by
+        USB VID:PID and the role comes from the interface number, so it stays
+        right when ACM numbers shift after a replug or another CDC device is
+        attached. Falls back to guessing from /dev/ttyACM* order when pyserial
+        reports no Bus Pirate (e.g. no USB metadata available).
         """
+        usb = _usb_ports()
+        if usb:
+            return usb
         paths = sorted(glob("/dev/ttyACM*"))
         devices = []
         for i, p in enumerate(paths):
