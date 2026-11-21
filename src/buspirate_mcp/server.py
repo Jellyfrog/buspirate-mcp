@@ -242,6 +242,77 @@ TOOL_DEFINITIONS = [
         },
     ),
     Tool(
+        name="gpio_read",
+        description=(
+            "Read direction, level, voltage and mode label of one IO pin, or "
+            "all IO0-IO7 when pin is omitted. [read-only] [Duration: instant.]"
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"pin": {"type": "integer", "minimum": 0, "maximum": 7}},
+            "required": [],
+        },
+        annotations={"readOnlyHint": True},
+    ),
+    Tool(
+        name="gpio_set",
+        description=(
+            "Drive a free IO pin high (1) or low (0). Refuses pins the active "
+            "mode uses. The pin stays driven until gpio_release. "
+            "[allowed-write] [Duration: instant.]"
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "pin": {"type": "integer", "minimum": 0, "maximum": 7, "description": "IO pin (0-7). Pins used by the active mode are refused."},
+                "level": {"type": "integer", "enum": [0, 1]},
+            },
+            "required": ["pin", "level"],
+        },
+    ),
+    Tool(
+        name="gpio_release",
+        description=(
+            "Return a free IO pin to input (high impedance). "
+            "[allowed-write] [Duration: instant.]"
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"pin": {"type": "integer", "minimum": 0, "maximum": 7, "description": "IO pin (0-7). Pins used by the active mode are refused."}},
+            "required": ["pin"],
+        },
+    ),
+    Tool(
+        name="gpio_pulse",
+        description=(
+            "Drive a free IO pin to level for duration_ms, then release it. "
+            "Use for target reset lines. "
+            "[allowed-write] [Duration: fast (duration_ms, max 10 s).]"
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "pin": {"type": "integer", "minimum": 0, "maximum": 7, "description": "IO pin (0-7). Pins used by the active mode are refused."},
+                "level": {"type": "integer", "enum": [0, 1], "default": 0},
+                "duration_ms": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 100},
+            },
+            "required": ["pin"],
+        },
+    ),
+    Tool(
+        name="set_pullups",
+        description=(
+            "Enable or disable the BusPirate's pull-up resistors (to VOUT) on "
+            "all IO pins. I2C and 1-Wire turn them on when opened. "
+            "[allowed-write] [Duration: instant.]"
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {"enable": {"type": "boolean"}},
+            "required": ["enable"],
+        },
+    ),
+    Tool(
         name="read_flash",
         description=(
             "Read flash memory from target via esptool through BP6 UART bridge. "
@@ -758,6 +829,35 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
         elif name == "get_status":
             result = await tools.tool_get_status(hardware=_get_hardware())
+
+        elif name == "gpio_read":
+            result = await tools.tool_gpio_read(
+                hardware=_get_hardware(), pin=arguments.get("pin"),
+            )
+
+        elif name == "gpio_set":
+            result = await tools.tool_gpio_set(
+                hardware=_get_hardware(),
+                pin=arguments["pin"], level=arguments["level"],
+            )
+
+        elif name == "gpio_release":
+            result = await tools.tool_gpio_release(
+                hardware=_get_hardware(), pin=arguments["pin"],
+            )
+
+        elif name == "gpio_pulse":
+            result = await tools.tool_gpio_pulse(
+                hardware=_get_hardware(),
+                pin=arguments["pin"],
+                level=arguments.get("level", 0),
+                duration_ms=arguments.get("duration_ms", 100),
+            )
+
+        elif name == "set_pullups":
+            result = await tools.tool_set_pullups(
+                hardware=_get_hardware(), enable=arguments["enable"],
+            )
 
         elif name == "verify_connection":
             hw = _get_hardware()

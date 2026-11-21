@@ -7,7 +7,7 @@ from buspirate_mcp.safety import SafetyTier, classify_tool, validate_voltage_ran
 class TestClassifyTool:
     def test_read_only_tools(self):
         for tool in [
-            "list_devices", "get_status", "verify_connection", "scan_baud", "read_output",
+            "list_devices", "get_status", "gpio_read", "verify_connection", "scan_baud", "read_output",
             "spi_probe", "spi_read", "spi_dump", "spi_transfer",
             "i2c_scan", "i2c_read", "i2c_dump",
             "onewire_search", "onewire_read",
@@ -17,6 +17,7 @@ class TestClassifyTool:
 
     def test_allowed_write_tools(self):
         for tool in [
+            "gpio_set", "gpio_release", "gpio_pulse", "set_pullups",
             "open_uart", "send_command", "close_uart",
             "enter_download_mode", "read_flash",
             "open_spi", "close_spi",

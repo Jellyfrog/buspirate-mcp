@@ -1662,3 +1662,75 @@ class TestPsuCheckAfterChange:
             result = await tool_set_power(hw, True)
         assert result["applied"] is True
         assert "no response" in result["psu_check_error"]
+
+
+# -- GPIO / pull-ups --
+
+from buspirate_mcp.tools import (
+    tool_gpio_set, tool_gpio_release, tool_gpio_read, tool_gpio_pulse,
+    tool_set_pullups,
+)
+
+
+def _gpio_hw(status=None):
+    hw = MagicMock()
+    hw.get_status.return_value = status or _STATUS
+    return hw
+
+
+class TestGpioTools:
+    @pytest.mark.asyncio
+    async def test_set_free_pin(self):
+        hw = _gpio_hw()
+        result = await tool_gpio_set(hw, 2, 1)
+        hw.set_pin_output.assert_called_once_with(2, high=True)
+        assert result["pin"] == "IO2"
+
+    @pytest.mark.asyncio
+    async def test_refuses_mode_pin(self):
+        hw = _gpio_hw()  # IO4 is UART TX in _STATUS
+        result = await tool_gpio_set(hw, 4, 0)
+        assert "in use by the UART mode as 'TX->'" in result["error"]
+        hw.set_pin_output.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_bad_pin_and_level(self):
+        hw = _gpio_hw()
+        assert "pin must be 0-7" in (await tool_gpio_set(hw, 8, 1))["error"]
+        assert "pin must be 0-7" in (await tool_gpio_set(hw, True, 1))["error"]
+        assert "level must be" in (await tool_gpio_set(hw, 1, 2))["error"]
+        hw.set_pin_output.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_release(self):
+        hw = _gpio_hw()
+        await tool_gpio_release(hw, 3)
+        hw.release_pin.assert_called_once_with(3)
+
+    @pytest.mark.asyncio
+    async def test_read_one_and_all(self):
+        hw = _gpio_hw()
+        assert (await tool_gpio_read(hw, 4))["label"] == "TX->"
+        assert len((await tool_gpio_read(hw))["pins"]) == 8
+
+    @pytest.mark.asyncio
+    async def test_pulse_releases_even_on_cancel(self):
+        hw = _gpio_hw()
+        with patch("buspirate_mcp.tools.asyncio.sleep", side_effect=RuntimeError("x")):
+            with pytest.raises(RuntimeError):
+                await tool_gpio_pulse(hw, 1, 0, 50)
+        hw.release_pin.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_pulse_duration_bounds(self):
+        hw = _gpio_hw()
+        assert "duration_ms" in (await tool_gpio_pulse(hw, 1, 0, 0))["error"]
+        assert "duration_ms" in (await tool_gpio_pulse(hw, 1, 0, 20000))["error"]
+
+    @pytest.mark.asyncio
+    async def test_pullups_warn_without_vout(self):
+        hw = _gpio_hw({**_STATUS, "psu_enabled": False, "pullup_enabled": True})
+        result = await tool_set_pullups(hw, True)
+        hw.set_pullups.assert_called_once_with(True)
+        assert result["pullups_enabled"] is True
+        assert "VOUT" in result["warning"]

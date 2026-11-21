@@ -192,6 +192,13 @@ class BusPirateHardware:
             raise RuntimeError("status request failed: no response from BusPirate")
         return status
 
+    def set_pullups(self, enable: bool) -> bool:
+        """Enable or disable the on-board pull-up resistors (to VOUT)."""
+        key = "pullup_enable" if enable else "pullup_disable"
+        if self.client.configuration_request(**{key: True}) is not True:
+            raise RuntimeError(f"pull-up {'enable' if enable else 'disable'} failed")
+        return True
+
     def get_pin_voltages(self) -> list[int]:
         """Read ADC millivolt values for all IO pins."""
         return self._active_protocol.get_adc_mv()

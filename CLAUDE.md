@@ -26,8 +26,8 @@ Only `hardware.py` imports from the BPIO2 SDK. Everything else talks to `hardwar
 
 Three tiers enforced at the MCP server boundary:
 
-- **read-only**: full autonomy (list_devices, get_status, verify_connection, scan_baud, read_output, spi_probe, spi_read, spi_dump, spi_transfer, i2c_scan, i2c_read, i2c_dump, onewire_search, onewire_read, la_command, la_analyze, la_identify)
-- **allowed-write**: autonomous but logged (open_uart, send_command, close_uart, enter_download_mode, read_flash, open_spi, close_spi, open_i2c, close_i2c, open_1wire, close_1wire, la_prepare, la_cleanup)
+- **read-only**: full autonomy (list_devices, get_status, gpio_read, verify_connection, scan_baud, read_output, spi_probe, spi_read, spi_dump, spi_transfer, i2c_scan, i2c_read, i2c_dump, onewire_search, onewire_read, la_command, la_analyze, la_identify)
+- **allowed-write**: autonomous but logged (gpio_set, gpio_release, gpio_pulse, set_pullups, open_uart, send_command, close_uart, enter_download_mode, read_flash, open_spi, close_spi, open_i2c, close_i2c, open_1wire, close_1wire, la_prepare, la_cleanup)
 - **approval-write**: blocks until human confirms via _confirmed token (set_voltage, set_power, spi_write, i2c_write)
 
 Wrong voltage fries chips. Writing SPI flash or I2C devices overwrites data irreversibly. Do not bypass or weaken the approval-write gate.

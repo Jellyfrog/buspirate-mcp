@@ -445,6 +445,99 @@ async def tool_enter_download_mode(
     }
 
 
+# -- GPIO and pull-ups --
+
+GPIO_PULSE_MAX_MS = 10_000
+
+
+def _check_gpio_pin(hardware: Any, pin: Any) -> tuple[dict[str, Any] | None, dict]:
+    """Validate pin and refuse pins the active mode owns.
+
+    Returns (error_or_None, status). Driving a mode pin (UART TX, SPI CLK,
+    I2C SDA...) as GPIO would fight the protocol and the target.
+    """
+    if not isinstance(pin, int) or isinstance(pin, bool) or not 0 <= pin <= 7:
+        return {"error": f"pin must be 0-7, got: {pin}"}, {}
+    status = hardware.get_status()
+    labels = status.get("mode_pin_labels") or []
+    label = labels[pin + _LABEL_OFFSET] if pin + _LABEL_OFFSET < len(labels) else ""
+    if label:
+        return {
+            "error": (
+                f"IO{pin} is in use by the {status.get('mode_current')} mode "
+                f"as '{label}'. Pick a free pin."
+            ),
+        }, status
+    return None, status
+
+
+def _pin_state(status: dict[str, Any], pin: int) -> dict[str, Any]:
+    return _summarize_status(status)["pins"][pin]
+
+
+async def tool_gpio_set(hardware: Any, pin: int, level: int) -> dict[str, Any]:
+    """Drive a free IO pin high or low."""
+    err, _ = _check_gpio_pin(hardware, pin)
+    if err:
+        return err
+    if level not in (0, 1):
+        return {"error": f"level must be 0 or 1, got: {level}"}
+    hardware.set_pin_output(pin, high=bool(level))
+    return {"pin": f"IO{pin}", **_pin_state(hardware.get_status(), pin)}
+
+
+async def tool_gpio_release(hardware: Any, pin: int) -> dict[str, Any]:
+    """Return a free IO pin to input (high impedance)."""
+    err, _ = _check_gpio_pin(hardware, pin)
+    if err:
+        return err
+    hardware.release_pin(pin)
+    return {"pin": f"IO{pin}", **_pin_state(hardware.get_status(), pin)}
+
+
+async def tool_gpio_read(hardware: Any, pin: int | None = None) -> dict[str, Any]:
+    """Read direction, level and voltage of one IO pin, or all of them."""
+    pins = _summarize_status(hardware.get_status())["pins"]
+    if pin is None:
+        return {"pins": pins}
+    if not isinstance(pin, int) or isinstance(pin, bool) or not 0 <= pin <= 7:
+        return {"error": f"pin must be 0-7, got: {pin}"}
+    return pins[pin]
+
+
+async def tool_gpio_pulse(
+    hardware: Any, pin: int, level: int = 0, duration_ms: int = 100,
+) -> dict[str, Any]:
+    """Drive a free pin to level for duration_ms, then release it (e.g. a reset)."""
+    err, _ = _check_gpio_pin(hardware, pin)
+    if err:
+        return err
+    if level not in (0, 1):
+        return {"error": f"level must be 0 or 1, got: {level}"}
+    if not isinstance(duration_ms, int) or not 1 <= duration_ms <= GPIO_PULSE_MAX_MS:
+        return {"error": f"duration_ms must be 1-{GPIO_PULSE_MAX_MS}, got: {duration_ms}"}
+    hardware.set_pin_output(pin, high=bool(level))
+    try:
+        await asyncio.sleep(duration_ms / 1000)
+    finally:
+        hardware.release_pin(pin)
+    return {"pin": f"IO{pin}", "level": level, "duration_ms": duration_ms,
+            "released": True}
+
+
+async def tool_set_pullups(hardware: Any, enable: bool) -> dict[str, Any]:
+    """Enable or disable the pull-up resistors on all IO pins."""
+    hardware.set_pullups(enable)
+    status = hardware.get_status()
+    out = {"pullups_enabled": status.get("pullup_enabled")}
+    if enable and not status.get("psu_enabled"):
+        out["warning"] = (
+            "Pull-ups connect to VOUT. With the PSU off they only work if "
+            "the target supplies VOUT/VREF."
+        )
+    return out
+
+
 def _enter_bridge_mode(terminal_port: str) -> bool:
     """Enter UART bridge mode on the BP6 terminal port.
 
