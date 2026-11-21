@@ -360,81 +360,128 @@ async def tool_enter_download_mode(
     }
 
 
-def _enter_bridge_mode(terminal_port: str) -> bool:
+# Bridge options newer firmware accepts, by the long name `bridge -h` lists.
+_BRIDGE_OPTIONS = {"baud": "--baud", "reset": "--reset", "boot": "--boot"}
+
+
+def _terminal_read(ser: Any, delay: float) -> str:
+    time.sleep(delay)
+    return ser.read(ser.in_waiting or 1).decode("utf-8", errors="replace")
+
+
+def _terminal_to_uart_prompt(ser: Any) -> bool:
+    """Get the terminal to the UART> prompt. True when it is there."""
+    ser.read(ser.in_waiting or 1)
+    ser.write(b'\r')
+    resp = _terminal_read(ser, 0.5)
+
+    # Handle VT100 prompt (appears after fresh USB plug)
+    if 'VT100' in resp or resp.strip() == '':
+        ser.write(b'n\r')
+        resp = _terminal_read(ser, 0.5)
+
+    if 'UART>' in resp:
+        return True
+
+    if 'HiZ>' in resp:
+        # Need to enter UART mode first
+        ser.write(b'm\r')
+        _terminal_read(ser, 0.5)
+        ser.write(b'3\r')
+        _terminal_read(ser, 1)
+        ser.write(b'y\r')
+        resp = _terminal_read(ser, 0.5)
+        if 'UART>' not in resp:
+            ser.write(b'\r')
+            resp += _terminal_read(ser, 0.5)
+        return 'UART>' in resp
+    return False
+
+
+def _bridge_supported_options(ser: Any) -> set[str]:
+    """Which bridge options this firmware has, from `bridge -h`."""
+    ser.write(b'bridge -h\r')
+    help_text = _terminal_read(ser, 1)
+    return {name for name, flag in _BRIDGE_OPTIONS.items() if flag in help_text}
+
+
+def _enter_bridge_mode(
+    terminal_port: str,
+    reset_pin: int = -1,
+    boot_pin: int = -1,
+) -> tuple[bool, dict[str, Any]]:
     """Enter UART bridge mode on the BP6 terminal port.
 
-    The bridge command makes ACM0 a transparent serial passthrough
-    to the target. Handles VT100 prompt, detects current mode, and
-    enters bridge. Returns True on success.
+    The bridge command makes ACM0 a transparent serial passthrough to the
+    target. When the firmware supports them, the bridge also follows baud
+    rate changes from esptool (-b) and, given reset_pin/boot_pin, drives the
+    target's EN and GPIO0 from DTR/RTS like an ESP dev board (-r/-g).
+
+    Returns (entered, info) where info lists the options used.
     """
     import serial
+    info: dict[str, Any] = {"follow_baud": False, "autoreset": False}
     ser = serial.Serial(terminal_port, 115200, timeout=2)
     try:
         time.sleep(0.5)
-        ser.read(ser.in_waiting or 1)
-
-        # Send enter to see what prompt we get
-        ser.write(b'\r')
-        time.sleep(0.5)
-        resp = ser.read(ser.in_waiting or 1).decode('utf-8', errors='replace')
-
-        # Handle VT100 prompt (appears after fresh USB plug)
-        if 'VT100' in resp or resp.strip() == '':
-            ser.write(b'n\r')
-            time.sleep(0.5)
-            resp = ser.read(ser.in_waiting or 1).decode('utf-8', errors='replace')
-
-        # Check if we're already in UART mode
-        if 'UART>' in resp or 'UART>' in resp.upper():
-            # Already in UART mode, send bridge
+        if not _terminal_to_uart_prompt(ser):
+            # maybe already bridging from an earlier call; try anyway
             ser.write(b'bridge\r')
-            time.sleep(1)
-            resp = ser.read(ser.in_waiting or 1).decode('utf-8', errors='replace')
-            return 'bridge' in resp.lower()
+            return 'bridge' in _terminal_read(ser, 1).lower(), info
 
-        if 'HiZ>' in resp:
-            # Need to enter UART mode first
-            ser.write(b'm\r')
-            time.sleep(0.5)
-            ser.read(ser.in_waiting or 1)
-            ser.write(b'3\r')
-            time.sleep(1)
-            ser.read(ser.in_waiting or 1)
-            ser.write(b'y\r')
-            time.sleep(0.5)
-            ser.read(ser.in_waiting or 1)
-
-        # Try bridge
-        ser.write(b'bridge\r')
-        time.sleep(1)
-        resp = ser.read(ser.in_waiting or 1).decode('utf-8', errors='replace')
-        return 'bridge' in resp.lower()
-    except Exception:
-        return False
+        supported = _bridge_supported_options(ser)
+        info["firmware_options"] = sorted(supported)
+        args = []
+        if "baud" in supported:
+            args.append("-b")
+            info["follow_baud"] = True
+        if reset_pin >= 0 and boot_pin >= 0:
+            if {"reset", "boot"} <= supported:
+                args += ["-r", str(reset_pin), "-g", str(boot_pin)]
+                info["autoreset"] = True
+            else:
+                info["autoreset_unsupported"] = (
+                    "Firmware bridge has no -r/-g options; update the firmware."
+                )
+        ser.write(("bridge " + " ".join(args)).strip().encode() + b'\r')
+        resp = _terminal_read(ser, 1)
+        info["command"] = ("bridge " + " ".join(args)).strip()
+        if "error" in resp.lower():
+            info["bridge_error"] = resp.strip()[-200:]
+            return False, info
+        return 'bridge' in resp.lower(), info
+    except Exception as exc:
+        info["exception"] = str(exc)
+        return False, info
     finally:
         ser.close()
 
 
 def _exit_bridge_mode(terminal_port: str) -> None:
-    """Attempt to exit UART bridge mode on the BP6.
+    """Ask the BP6 to leave UART bridge mode with a serial BREAK.
 
-    Bridge mode exits when the BP6 button is pressed, or when the
-    serial port is closed with a break condition. We send a serial
-    break and toggle DTR/RTS to signal the BP6 to drop bridge mode.
+    Firmware with the bridge exit fix leaves the bridge on a BREAK. Only a
+    BREAK is sent: toggling DTR and RTS one after the other would pass
+    through "RTS alone asserted", which resets an ESP target wired for
+    auto-reset. Opening and closing the port changes both lines together,
+    which the auto-reset logic ignores.
     """
     import serial
     try:
         ser = serial.Serial(terminal_port, 115200, timeout=1)
-        ser.send_break(duration=0.5)
-        ser.dtr = False
-        ser.rts = False
-        time.sleep(0.3)
-        ser.dtr = True
-        ser.rts = True
-        time.sleep(0.3)
+        ser.send_break(duration=0.25)
+        time.sleep(0.2)
         ser.close()
     except Exception:
         pass  # best effort
+
+
+def _bpio_alive(hardware: Any) -> bool:
+    """True when BPIO2 answers, i.e. the bridge is no longer blocking it."""
+    try:
+        return bool(hardware.ping())
+    except Exception:
+        return False
 
 
 async def tool_read_flash(
@@ -446,12 +493,16 @@ async def tool_read_flash(
     boot_pin: int = -1,
     reset_pin: int = -1,
     baud: int = 115200,
+    autoreset: bool = False,
 ) -> dict[str, Any]:
     """Read flash memory from target via esptool through BP6 UART bridge.
 
-    Optionally enters download mode first if boot_pin and reset_pin are
-    provided. Then enters bridge mode on the terminal port and runs
-    esptool read-flash.
+    With boot_pin and reset_pin, the target is put into its bootloader
+    first. autoreset=True has the firmware bridge drive those pins from
+    esptool's DTR/RTS (bridge -r/-g) so esptool resets the target itself;
+    otherwise they are toggled over BPIO2 before the bridge starts. When
+    the firmware supports it the bridge follows esptool's baud changes
+    (bridge -b), and it is left with a serial BREAK afterwards.
     """
     # Validate pin numbers when they are being used
     if boot_pin >= 0 and (not isinstance(boot_pin, int) or boot_pin > 7):
@@ -459,8 +510,12 @@ async def tool_read_flash(
     if reset_pin >= 0 and (not isinstance(reset_pin, int) or reset_pin > 7):
         return {"error": f"reset_pin must be 0-7, got: {reset_pin}"}
 
-    # Step 1: Enter download mode if pins provided
-    if boot_pin >= 0 and reset_pin >= 0:
+    have_pins = boot_pin >= 0 and reset_pin >= 0
+    if autoreset and not have_pins:
+        return {"error": "autoreset needs boot_pin and reset_pin"}
+
+    # Step 1: Enter download mode over BPIO2 unless the bridge will do it
+    if have_pins and not autoreset:
         dl_result = await tool_enter_download_mode(
             hardware, boot_pin, reset_pin,
         )
@@ -471,7 +526,18 @@ async def tool_read_flash(
     # If bridge is already active from a previous read_flash call,
     # _enter_bridge_mode will send 'bridge\r' which the target ignores.
     # esptool will re-sync either way.
-    _enter_bridge_mode(terminal_port)
+    if autoreset:
+        _, bridge_info = _enter_bridge_mode(
+            terminal_port, reset_pin=reset_pin, boot_pin=boot_pin,
+        )
+        if not bridge_info.get("autoreset"):
+            _exit_bridge_mode(terminal_port)
+            return {
+                "error": "Firmware bridge does not support auto-reset (-r/-g)",
+                "bridge": bridge_info,
+            }
+    else:
+        _, bridge_info = _enter_bridge_mode(terminal_port)
 
     # Step 3: Run esptool
     output = Path(output_path)
@@ -482,9 +548,14 @@ async def tool_read_flash(
     if not esptool_bin:
         # Fall back to looking next to the Python interpreter
         esptool_bin = str(Path(sys.executable).parent / 'esptool')
+    # With auto-reset esptool resets into the bootloader and back into the
+    # application itself, through DTR/RTS.
+    before, after = (
+        ('default-reset', 'hard-reset') if autoreset else ('no-reset', 'no-reset')
+    )
     cmd = [
         esptool_bin, '--port', terminal_port,
-        '--before', 'no-reset', '--after', 'no-reset',
+        '--before', before, '--after', after,
         '--no-stub', '--baud', str(baud),
         'read-flash', str(offset), str(size), str(output),
     ]
@@ -497,11 +568,13 @@ async def tool_read_flash(
     except FileNotFoundError:
         return {
             "error": "esptool not found. Install with: pip install esptool",
+            **_leave_bridge(hardware, terminal_port),
         }
     except subprocess.TimeoutExpired:
         return {
             "error": "esptool timed out",
             "command": ' '.join(cmd),
+            **_leave_bridge(hardware, terminal_port),
         }
 
     if result.returncode != 0:
@@ -510,17 +583,12 @@ async def tool_read_flash(
             "returncode": result.returncode,
             "stderr": result.stderr[-500:],
             "command": ' '.join(cmd),
+            **_leave_bridge(hardware, terminal_port),
         }
 
     file_size = output.stat().st_size if output.exists() else 0
 
-    # Step 4: Attempt cleanup.
-    # Bridge mode on ACM0 cannot be exited programmatically (only via
-    # the BP6 physical button). BPIO2 commands hang while bridge is
-    # active. The user must USB-replug the BP6 after flash operations
-    # to restore normal operation.
-    # TODO: find a way to exit bridge mode without physical button
-
+    # Step 4: leave the bridge so BPIO2 works again
     return {
         "status": "success",
         "output_path": str(output),
@@ -529,9 +597,26 @@ async def tool_read_flash(
         "size_requested": size,
         "baud": baud,
         "stdout": result.stdout[-300:],
+        "bridge": bridge_info,
+        **_leave_bridge(hardware, terminal_port),
+    }
+
+
+def _leave_bridge(hardware: Any, terminal_port: str) -> dict[str, Any]:
+    """Exit the bridge with a BREAK and report whether BPIO2 is back.
+
+    Older firmware ignores the BREAK; then the button or a replug is still
+    needed. A BPIO2 request also ends the bridge on newer firmware, so the
+    check itself is a second way out.
+    """
+    _exit_bridge_mode(terminal_port)
+    if _bpio_alive(hardware):
+        return {"bridge_exited": True}
+    return {
+        "bridge_exited": False,
         "cleanup": (
-            "Bridge mode is still active. Press the BP6 button or "
-            "USB-replug to exit bridge mode and restore normal operation."
+            "Bridge mode is still active (firmware without the bridge exit "
+            "fix). Press the BP6 button or USB-replug to restore BPIO2."
         ),
     }
 

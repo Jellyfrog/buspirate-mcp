@@ -76,7 +76,7 @@ BP6 UART mode uses IO4 (TX->) and IO5 (RX<-). The BP display is the authoritativ
 
 Free IO pins (IO0-IO3, IO6-IO7) can be used for GPIO control while UART mode is active on IO4/IO5. Use `set_pin_output()` and `release_pin()` in hardware.py. This enables automated bootloader entry (hold boot pin low, pulse reset).
 
-**Important:** BPIO2 (ACM1) and terminal bridge mode (ACM0) cannot operate simultaneously. The firmware locks up. Use BPIO2 for GPIO setup, then switch to terminal for bridge mode.
+**Important:** BPIO2 (ACM1) and terminal bridge mode (ACM0) cannot operate simultaneously: the bridge blocks the firmware loop that services BPIO2. Older firmware locks up; newer firmware leaves the bridge when a BPIO2 request arrives. Use BPIO2 for GPIO setup, then switch to terminal for bridge mode.
 
 ### Follow Along Logic Analyzer (FALA)
 
@@ -95,7 +95,9 @@ FALA and BPIO2 are mutually exclusive (both use ACM1). Close all BPIO2 sessions 
 
 The BP6 `bridge` command creates a transparent serial passthrough on ACM0. esptool.py can read/write flash through this bridge using `--before no-reset --after no-reset --no-stub`. Baud rates above 460800 risk buffer overruns in bridge mode.
 
-**After a flash dump, bridge mode stays active.** It cannot be exited programmatically. Press the physical button on the BP6 or USB-replug to exit bridge and restore normal BPIO2 operation.
+**Leaving the bridge:** firmware with the bridge exit fix leaves bridge mode on a serial BREAK on ACM0, or when a BPIO2 request arrives on ACM1. `read_flash` sends a BREAK after esptool and reports `bridge_exited`. Older firmware ignores both; then press the BP6 button or USB-replug. Never toggle DTR and RTS one at a time on ACM0 while auto-reset pins are wired: "RTS alone asserted" resets the target.
+
+**Bridge options (newer firmware, detected from `bridge -h`):** `-b` makes the bridge follow the host's baud rate, so esptool can switch to a faster rate. `-r <IO> -g <IO>` drives the target's EN and GPIO0 from DTR/RTS with ESP dev-board logic, so esptool's default reset works (`read_flash autoreset=true`).
 
 ### USB CDC ports
 

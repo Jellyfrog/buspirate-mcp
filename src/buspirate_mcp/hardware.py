@@ -182,6 +182,10 @@ class BusPirateHardware:
         mask = 1 << pin
         proto.set_io_direction(direction_mask=mask, direction=0)
 
+    def ping(self) -> bool:
+        """True if the BusPirate answers a BPIO2 status request."""
+        return bool(self.client.status_request())
+
     def get_pin_voltages(self) -> list[int]:
         """Read ADC millivolt values for all IO pins."""
         return self._active_protocol.get_adc_mv()
