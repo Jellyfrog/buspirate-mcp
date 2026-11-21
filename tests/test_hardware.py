@@ -467,3 +467,14 @@ class TestOneWireOperations:
         hw._active_mode = "spi"
         with pytest.raises(RuntimeError, match="Mode 'spi' is active"):
             hw.configure_1wire()
+
+
+class TestClose:
+    def test_close_releases_port_without_touching_psu(self):
+        client = MagicMock()
+        hw = BusPirateHardware(client=client, uart=MagicMock())
+        hw.close()
+        client.close.assert_called_once()
+        client.configuration_request.assert_not_called()
+        assert hw.client is None
+        hw.close()  # idempotent

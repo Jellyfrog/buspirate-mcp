@@ -316,6 +316,19 @@ class BusPirateHardware:
                 return d["path"]
         return devices[0]["path"] if devices else None
 
+    def close(self) -> None:
+        """Release the BPIO2 serial port, leaving the PSU and pins as they are.
+
+        For handing ACM1 to another user (FALA). The object is unusable
+        afterwards; connect() again for BPIO2.
+        """
+        client, self.client = self.client, None
+        if client is not None:
+            try:
+                client.close()  # stops the SDK's reader thread too
+            except Exception:
+                pass  # best effort -- port may already be gone
+
     def disconnect(self) -> None:
         """Disable PSU and clean up the connection."""
         proto = self._active_protocol

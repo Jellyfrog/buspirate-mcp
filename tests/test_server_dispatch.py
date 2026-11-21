@@ -118,3 +118,12 @@ async def test_confirmed_requires_literal_true(confirmed_value):
     result = await server.call_tool("set_voltage", args)
     data = json.loads(result[0].text)
     assert data.get("confirmation_required") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["la_prepare", "la_cleanup"])
+async def test_la_tools_drop_cached_hardware(tool_name):
+    """After FALA takes ACM1 (or gives it back), BPIO2 must reconnect."""
+    server._hardware = MagicMock()
+    await server.call_tool(tool_name, TOOL_ARGS[tool_name])
+    assert server._hardware is None
