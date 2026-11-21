@@ -1,6 +1,6 @@
 # buspirate-mcp
 
-MCP server for BusPirate 6 hardware security testing. Exposes UART, SPI, I2C, 1-Wire, power supply, GPIO, and logic analyzer operations as [Model Context Protocol](https://modelcontextprotocol.io/) tools over stdio transport. 33 tools across 4 bus protocols + logic analyzer.
+MCP server for BusPirate 6 hardware security testing. Exposes UART, SPI, I2C, 1-Wire, power supply, GPIO, and logic analyzer operations as [Model Context Protocol](https://modelcontextprotocol.io/) tools over stdio transport. 34 tools across 4 bus protocols + logic analyzer.
 
 Built for use with Claude Code but works with any MCP client.
 
@@ -59,6 +59,7 @@ Set `PIDEV_ENGAGEMENTS_DIR` environment variable to control where engagement log
 | Tool | Safety Tier | Description |
 |---|---|---|
 | `list_devices` | read-only | Find BusPirate devices on USB |
+| `get_status` | read-only | Firmware, mode, PSU readings and current-limit trip, pin states |
 | `verify_connection` | read-only | Check for signal activity on pins |
 | `scan_baud` | read-only | Auto-detect baud rate |
 | `read_output` | read-only | Read UART data from target |

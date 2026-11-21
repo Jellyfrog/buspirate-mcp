@@ -26,7 +26,7 @@ Only `hardware.py` imports from the BPIO2 SDK. Everything else talks to `hardwar
 
 Three tiers enforced at the MCP server boundary:
 
-- **read-only**: full autonomy (list_devices, verify_connection, scan_baud, read_output, spi_probe, spi_read, spi_dump, spi_transfer, i2c_scan, i2c_read, i2c_dump, onewire_search, onewire_read, la_command, la_analyze, la_identify)
+- **read-only**: full autonomy (list_devices, get_status, verify_connection, scan_baud, read_output, spi_probe, spi_read, spi_dump, spi_transfer, i2c_scan, i2c_read, i2c_dump, onewire_search, onewire_read, la_command, la_analyze, la_identify)
 - **allowed-write**: autonomous but logged (open_uart, send_command, close_uart, enter_download_mode, read_flash, open_spi, close_spi, open_i2c, close_i2c, open_1wire, close_1wire, la_prepare, la_cleanup)
 - **approval-write**: blocks until human confirms via _confirmed token (set_voltage, set_power, spi_write, i2c_write)
 
@@ -42,7 +42,7 @@ The BP6 must have BPIO2 binary mode enabled before the SDK can talk to it. Enabl
 
 BP6 UART mode uses IO4 (TX->) and IO5 (RX<-). The BP display is the authoritative source for pin assignment.
 
-**Beware:** `status_request()` returns a `mode_pin_labels` array that includes VOUT at index 0, shifting all labels by one. Index 5 in the labels array = physical IO4, index 6 = IO5. Trust the display, not the raw array indices.
+**Beware:** `status_request()` returns `mode_pin_labels` as [VOUT, IO0..IO7, GND], so label index n+1 is IOn. `adc_mv` has no VOUT entry: index n is IOn. `get_status` applies this mapping.
 
 ### SPI Mode
 

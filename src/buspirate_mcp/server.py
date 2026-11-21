@@ -69,6 +69,18 @@ TOOL_DEFINITIONS = [
         inputSchema={"type": "object", "properties": {}, "required": []},
     ),
     Tool(
+        name="get_status",
+        description=(
+            "Read the BusPirate's state: firmware version, active mode, PSU "
+            "set and measured voltage/current, whether the PSU current limit "
+            "tripped, pull-ups, and per-pin label, voltage, direction and "
+            "level for IO0-IO7. Check it after powering a target. "
+            "[read-only] [Duration: instant.]"
+        ),
+        inputSchema={"type": "object", "properties": {}, "required": []},
+        annotations={"readOnlyHint": True},
+    ),
+    Tool(
         name="verify_connection",
         description=(
             "Check for signal activity on specified pins. "
@@ -173,6 +185,8 @@ TOOL_DEFINITIONS = [
         name="set_voltage",
         description=(
             "Set power supply voltage (0.8-5.0V) and current limit (0-500mA). "
+            "Returns the measured voltage/current and whether the current "
+            "limit tripped. "
             "DANGEROUS: wrong voltage can damage target hardware. "
             "[approval-write] [Duration: instant.]"
         ),
@@ -741,6 +755,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     try:
         if name == "list_devices":
             result = await tools.tool_list_devices()
+
+        elif name == "get_status":
+            result = await tools.tool_get_status(hardware=_get_hardware())
 
         elif name == "verify_connection":
             hw = _get_hardware()

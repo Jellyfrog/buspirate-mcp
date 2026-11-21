@@ -66,6 +66,8 @@ SPI_MANUFACTURERS = {
 }
 PROMPT_PATTERN = re.compile(r"^\s*[#$>\]]", re.MULTILINE)
 BAUD_SCAN_READ_TIME_S = 0.5
+# Let the PSU and its current limiter settle before measuring after a change
+PSU_SETTLE_S = 0.1
 SILENCE_THRESHOLD_S = 0.5
 
 
@@ -287,6 +289,85 @@ async def tool_close_uart(
     return {"closed": True, "session_id": session_id}
 
 
+# mode_pin_labels from the firmware is [VOUT, IO0..IO7, GND]; adc_mv is IO0..IO7.
+_LABEL_OFFSET = 1
+
+
+def _psu_warnings(status: dict[str, Any]) -> list[str]:
+    warnings = []
+    if status.get("psu_current_error"):
+        warnings.append(
+            "PSU current limit tripped: the supply shut itself off. Check the "
+            "target for a short or excessive load before enabling it again."
+        )
+    return warnings
+
+
+def _summarize_status(status: dict[str, Any]) -> dict[str, Any]:
+    labels = status.get("mode_pin_labels") or []
+    adc = status.get("adc_mv") or []
+    direction = status.get("io_direction") or 0
+    value = status.get("io_value") or 0
+    pins = []
+    for io in range(8):
+        li = io + _LABEL_OFFSET
+        pins.append({
+            "pin": f"IO{io}",
+            "label": labels[li] if li < len(labels) and labels[li] else None,
+            "voltage_mv": adc[io] if io < len(adc) else None,
+            "direction": "output" if direction & (1 << io) else "input",
+            "level": 1 if value & (1 << io) else 0,
+        })
+    return {
+        "firmware": {
+            "git_hash": status.get("version_firmware_git_hash"),
+            "build_date": status.get("version_firmware_date"),
+            "hardware": (
+                f"{status.get('version_hardware_major')}."
+                f"{status.get('version_hardware_minor')}"
+            ),
+            "bpio_version": (
+                f"{status.get('version_flatbuffers_major')}."
+                f"{status.get('version_flatbuffers_minor')}"
+            ),
+        },
+        "mode": status.get("mode_current"),
+        "psu": {
+            "enabled": status.get("psu_enabled"),
+            "set_mv": status.get("psu_set_mv"),
+            "set_ma": status.get("psu_set_ma"),
+            "measured_mv": status.get("psu_measured_mv"),
+            "measured_ma": status.get("psu_measured_ma"),
+            "current_limit_tripped": bool(status.get("psu_current_error")),
+        },
+        "pullups_enabled": status.get("pullup_enabled"),
+        "pins": pins,
+        "max_read": status.get("mode_max_read"),
+        "max_write": status.get("mode_max_write"),
+        "warnings": _psu_warnings(status),
+    }
+
+
+async def tool_get_status(hardware: Any) -> dict[str, Any]:
+    """Read the BusPirate's state: firmware, mode, PSU readings, pins."""
+    return _summarize_status(hardware.get_status())
+
+
+async def _psu_check(hardware: Any) -> dict[str, Any]:
+    """Measure the PSU right after a change and flag a tripped current limit."""
+    await asyncio.sleep(PSU_SETTLE_S)
+    try:
+        status = hardware.get_status()
+    except Exception as exc:  # report, do not hide the PSU change itself
+        return {"psu_check_error": str(exc)}
+    return {
+        "measured_mv": status.get("psu_measured_mv"),
+        "measured_ma": status.get("psu_measured_ma"),
+        "current_limit_tripped": bool(status.get("psu_current_error")),
+        "warnings": _psu_warnings(status),
+    }
+
+
 async def tool_set_voltage(
     hardware: Any,
     voltage_v: float,
@@ -304,6 +385,7 @@ async def tool_set_voltage(
         "voltage_v": voltage_v,
         "current_limit_ma": current_limit_ma,
         "error": None,
+        **(await _psu_check(hardware)),
     }
 
 
@@ -313,10 +395,13 @@ async def tool_set_power(
 ) -> dict[str, Any]:
     """Enable or disable power supply."""
     result = hardware.set_power(enable)
-    return {
+    out = {
         "applied": result,
         "power": "on" if enable else "off",
     }
+    if enable:
+        out.update(await _psu_check(hardware))
+    return out
 
 
 async def tool_enter_download_mode(

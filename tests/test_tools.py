@@ -1576,3 +1576,89 @@ class TestValidateLaCommand:
 
     def test_no_brackets(self):
         assert "missing bus transaction brackets" in _validate_la_command("0x9f r:3")
+
+
+# -- get_status / PSU checks --
+
+from buspirate_mcp.tools import tool_get_status, _summarize_status
+
+_STATUS = {
+    "version_firmware_git_hash": "e9cb31e",
+    "version_firmware_date": "Nov 21 2026",
+    "version_hardware_major": 6, "version_hardware_minor": 2,
+    "version_flatbuffers_major": 2, "version_flatbuffers_minor": 0,
+    "mode_current": "UART",
+    "mode_pin_labels": ["VOUT", "", "", "", "", "TX->", "RX<-", "", "", "GND"],
+    "adc_mv": [0, 0, 0, 0, 3300, 3290, 0, 12],
+    "io_direction": 0b00010001, "io_value": 0b00010000,
+    "psu_enabled": True, "psu_set_mv": 3300, "psu_set_ma": 100,
+    "psu_measured_mv": 3298, "psu_measured_ma": 12, "psu_current_error": False,
+    "pullup_enabled": False, "mode_max_read": 512, "mode_max_write": 512,
+}
+
+
+class TestGetStatus:
+    def test_labels_are_shifted_past_vout(self):
+        pins = _summarize_status(_STATUS)["pins"]
+        assert pins[4]["label"] == "TX->"
+        assert pins[5]["label"] == "RX<-"
+        assert pins[0]["label"] is None
+
+    def test_pin_voltage_direction_level(self):
+        pins = _summarize_status(_STATUS)["pins"]
+        assert pins[4] == {
+            "pin": "IO4", "label": "TX->", "voltage_mv": 3300,
+            "direction": "output", "level": 1,
+        }
+        assert pins[0]["direction"] == "output" and pins[0]["level"] == 0
+        assert pins[7]["direction"] == "input"
+
+    def test_psu_and_firmware(self):
+        s = _summarize_status(_STATUS)
+        assert s["psu"]["measured_mv"] == 3298
+        assert s["psu"]["current_limit_tripped"] is False
+        assert s["firmware"]["git_hash"] == "e9cb31e"
+        assert s["warnings"] == []
+
+    def test_tripped_current_limit_warns(self):
+        s = _summarize_status({**_STATUS, "psu_current_error": True})
+        assert s["psu"]["current_limit_tripped"] is True
+        assert "current limit tripped" in s["warnings"][0]
+
+    @pytest.mark.asyncio
+    async def test_tool_uses_hardware_status(self):
+        hw = MagicMock()
+        hw.get_status.return_value = _STATUS
+        result = await tool_get_status(hw)
+        assert result["mode"] == "UART"
+
+
+class TestPsuCheckAfterChange:
+    @pytest.mark.asyncio
+    async def test_set_voltage_reports_trip(self):
+        hw = MagicMock()
+        hw.set_voltage.return_value = True
+        hw.get_status.return_value = {**_STATUS, "psu_current_error": True}
+        with patch("buspirate_mcp.tools.PSU_SETTLE_S", 0):
+            result = await tool_set_voltage(hw, 3.3, 100)
+        assert result["applied"] is True
+        assert result["current_limit_tripped"] is True
+        assert result["warnings"]
+
+    @pytest.mark.asyncio
+    async def test_power_off_skips_check(self):
+        hw = MagicMock()
+        hw.set_power.return_value = True
+        result = await tool_set_power(hw, False)
+        hw.get_status.assert_not_called()
+        assert result == {"applied": True, "power": "off"}
+
+    @pytest.mark.asyncio
+    async def test_status_failure_does_not_hide_psu_change(self):
+        hw = MagicMock()
+        hw.set_power.return_value = True
+        hw.get_status.side_effect = RuntimeError("no response")
+        with patch("buspirate_mcp.tools.PSU_SETTLE_S", 0):
+            result = await tool_set_power(hw, True)
+        assert result["applied"] is True
+        assert "no response" in result["psu_check_error"]

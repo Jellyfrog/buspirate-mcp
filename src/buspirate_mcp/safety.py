@@ -19,6 +19,7 @@ class SafetyTier(Enum):
 
 _TOOL_TIERS: dict[str, SafetyTier] = {
     "list_devices": SafetyTier.READ_ONLY,
+    "get_status": SafetyTier.READ_ONLY,
     "verify_connection": SafetyTier.READ_ONLY,
     "scan_baud": SafetyTier.READ_ONLY,
     "read_output": SafetyTier.READ_ONLY,
