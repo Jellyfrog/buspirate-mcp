@@ -6,10 +6,14 @@ server. Claude Code spawns this process and communicates over stdin/stdout.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
+import sys
 from pathlib import Path
+
+import anyio
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -1036,8 +1040,29 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
+def claim_stdout_for_protocol() -> io.TextIOWrapper:
+    """Reserve the real stdout for MCP messages and send everything else to stderr.
+
+    The BPIO2 SDK print()s on many paths (timeouts, configuration errors,
+    COBS errors), and any stray byte on stdout corrupts the stdio transport.
+    Redirecting sys.stdout per call missed those paths. Instead, keep a
+    private duplicate of fd 1 for the transport and point fd 1 and
+    sys.stdout at stderr, which also covers C extensions and child
+    processes that inherit fd 1.
+    """
+    sys.stdout.flush()
+    protocol_fd = os.dup(1)
+    os.dup2(2, 1)
+    sys.stdout = sys.stderr
+    return io.TextIOWrapper(
+        os.fdopen(protocol_fd, "wb", buffering=0), encoding="utf-8",
+        newline="\n", write_through=True,
+    )
+
+
 async def main():
-    async with stdio_server() as (read_stream, write_stream):
+    protocol_out = anyio.wrap_file(claim_stdout_for_protocol())
+    async with stdio_server(stdout=protocol_out) as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
 
