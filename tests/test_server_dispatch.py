@@ -118,3 +118,36 @@ async def test_confirmed_requires_literal_true(confirmed_value):
     result = await server.call_tool("set_voltage", args)
     data = json.loads(result[0].text)
     assert data.get("confirmation_required") is True
+
+
+class TestCallResult:
+    """tools/call results: structuredContent plus text, isError on failure."""
+
+    def _result(self, payload):
+        return server._call_result([TextContent(type="text", text=json.dumps(payload))])
+
+    def test_success(self):
+        r = self._result({"applied": True, "error": None})  # set_voltage on success
+        assert r.is_error is False
+        assert r.structured_content == {"applied": True, "error": None}
+
+    def test_tool_error(self):
+        assert self._result({"error": "I2C transfer: I2C NACK"}).is_error is True
+
+    def test_approval_refusal(self):
+        assert self._result({"confirmation_required": True}).is_error is True
+
+    def test_non_object_reply_has_no_structured_content(self):
+        r = server._call_result([TextContent(type="text", text="not json")])
+        assert r.structured_content is None and not r.is_error
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_raises_invalid_params():
+    from mcp.shared.exceptions import MCPError
+    params = MagicMock()
+    params.name = "nonexistent_tool"
+    params.arguments = {}
+    with pytest.raises(MCPError) as exc:
+        await server._on_call_tool(None, params)
+    assert exc.value.error.code == -32602

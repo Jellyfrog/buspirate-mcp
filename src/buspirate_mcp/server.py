@@ -2,6 +2,10 @@
 
 Registers all tools from tools.py with the MCP SDK and runs the
 server. Claude Code spawns this process and communicates over stdin/stdout.
+
+Protocol: MCP 2026-07-28 (stateless, per-request _meta, server/discover),
+served by the SDK alongside the older initialize-handshake versions
+(2024-11-05 to 2025-11-25), so existing clients keep working.
 """
 
 from __future__ import annotations
@@ -9,11 +13,21 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
 
-from mcp.server import Server
+from mcp.server.caching import CacheHint
+from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
+from mcp.shared.exceptions import MCPError
+from mcp.types import (
+    INVALID_PARAMS,
+    CallToolResult,
+    ListToolsResult,
+    TextContent,
+    Tool,
+)
 
 from buspirate_mcp.hardware import BusPirateHardware
 from buspirate_mcp.safety import classify_tool, SafetyTier
@@ -30,7 +44,10 @@ ENGAGEMENTS_DIR = Path(
     os.environ.get("PIDEV_ENGAGEMENTS_DIR", str(_PACKAGE_ROOT / "engagements"))
 )
 
-app = Server("buspirate-mcp")
+try:
+    _VERSION = _pkg_version("buspirate-mcp")
+except PackageNotFoundError:  # running from a source tree without install
+    _VERSION = "0.0.0"
 session_manager = SessionManager(engagements_dir=ENGAGEMENTS_DIR)
 
 # Hardware connection -- initialized lazily on first tool call that needs it
@@ -702,13 +719,52 @@ TOOL_DEFINITIONS = [
 ]
 
 
-@app.list_tools()
-async def list_tools():
+# Tools without parameters say so explicitly (2026-07-28 tools spec: an
+# object schema with additionalProperties false).
+for _tool in TOOL_DEFINITIONS:
+    if not _tool.input_schema.get("properties"):
+        _tool.input_schema.setdefault("additionalProperties", False)
+
+TOOL_NAMES = frozenset(t.name for t in TOOL_DEFINITIONS)
+
+
+async def list_tools() -> list[Tool]:
     return TOOL_DEFINITIONS
 
 
-@app.call_tool()
+def _call_result(content: list[TextContent]) -> CallToolResult:
+    """Wrap a tool's JSON reply as a 2026-07-28 tools/call result.
+
+    The JSON object goes in structuredContent and, serialized, in a text
+    block. A reply carrying an error, or a refusal from the approval gate,
+    is a tool execution error (isError), not a protocol error: the model
+    sees the reason and can act on it.
+    """
+    text = content[0].text if content else ""
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        payload = None
+    if not isinstance(payload, dict):
+        return CallToolResult(content=content)
+    is_error = bool(payload.get("error")) or payload.get("confirmation_required") is True
+    return CallToolResult(content=content, structuredContent=payload, isError=is_error)
+
+
+async def _on_list_tools(ctx, params) -> ListToolsResult:
+    return ListToolsResult(tools=await list_tools())
+
+
+async def _on_call_tool(ctx, params) -> CallToolResult:
+    name = params.name
+    if name not in TOOL_NAMES:
+        # protocol error per spec, not a tool result
+        raise MCPError(INVALID_PARAMS, f"Unknown tool: {name}")
+    return _call_result(await call_tool(name, dict(params.arguments or {})))
+
+
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """Run one tool and return its JSON reply as a single text block."""
     if name in {"open_uart", "open_spi", "open_i2c", "open_1wire", "la_prepare"} and "project_path" in arguments:
         return [TextContent(type="text", text=json.dumps(
             {"error": "project_path was renamed to engagement_path in v0.3; "
@@ -1036,7 +1092,42 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
+app = Server(
+    "buspirate-mcp",
+    version=_VERSION,
+    title="BusPirate MCP",
+    description=(
+        "Drive a BusPirate 5/6/7 over BPIO2: UART, SPI, I2C, 1-Wire, PSU, "
+        "GPIO, flash dumps and the follow-along logic analyzer."
+    ),
+    on_list_tools=_on_list_tools,
+    on_call_tool=_on_call_tool,
+    # The tool list and capabilities only change with a new server version.
+    cache_hints={
+        "tools/list": CacheHint(ttl_ms=300_000, scope="public"),
+        "server/discover": CacheHint(ttl_ms=300_000, scope="public"),
+    },
+)
+
+
+def _configure_logging() -> None:
+    """Log to stderr, which the stdio transport leaves to the server.
+
+    MCP's own logging feature is deprecated as of 2026-07-28 in favour of
+    stderr. This is where allowed-write tool calls are logged.
+    """
+    level = os.environ.get("BUSPIRATE_MCP_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        stream=sys.stderr,
+        level=getattr(logging, level, logging.INFO),
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
+
+
 async def main():
+    _configure_logging()
+    # stdio_server() points fd 1 at stderr while serving, so SDK print()s
+    # and child processes cannot corrupt the protocol stream.
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
