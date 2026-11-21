@@ -307,6 +307,23 @@ class BusPirateHardware:
         mask = 1 << pin
         self._config(f"IO{pin} input", io_direction_mask=mask, io_direction=0)
 
+    def get_status(self) -> dict[str, Any]:
+        """Full BPIO2 status: versions, mode, PSU readings, pins.
+
+        Goes to the client directly so it works before any mode is set.
+        """
+        status = self.client.status_request()
+        if not status:
+            raise RuntimeError("status request failed: no response from BusPirate")
+        return status
+
+    def set_pullups(self, enable: bool) -> bool:
+        """Enable or disable the on-board pull-up resistors (to VOUT)."""
+        key = "pullup_enable" if enable else "pullup_disable"
+        if self.client.configuration_request(**{key: True}) is not True:
+            raise RuntimeError(f"pull-up {'enable' if enable else 'disable'} failed")
+        return True
+
     def get_pin_voltages(self) -> list[int]:
         """Read ADC millivolt values for all IO pins."""
         return self._active_protocol.get_adc_mv()

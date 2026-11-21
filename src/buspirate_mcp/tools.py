@@ -66,6 +66,8 @@ SPI_MANUFACTURERS = {
 }
 PROMPT_PATTERN = re.compile(r"^\s*[#$>\]]", re.MULTILINE)
 BAUD_SCAN_READ_TIME_S = 0.5
+# Let the PSU and its current limiter settle before measuring after a change
+PSU_SETTLE_S = 0.1
 SILENCE_THRESHOLD_S = 0.5
 
 
@@ -287,6 +289,85 @@ async def tool_close_uart(
     return {"closed": True, "session_id": session_id}
 
 
+# mode_pin_labels from the firmware is [VOUT, IO0..IO7, GND]; adc_mv is IO0..IO7.
+_LABEL_OFFSET = 1
+
+
+def _psu_warnings(status: dict[str, Any]) -> list[str]:
+    warnings = []
+    if status.get("psu_current_error"):
+        warnings.append(
+            "PSU current limit tripped: the supply shut itself off. Check the "
+            "target for a short or excessive load before enabling it again."
+        )
+    return warnings
+
+
+def _summarize_status(status: dict[str, Any]) -> dict[str, Any]:
+    labels = status.get("mode_pin_labels") or []
+    adc = status.get("adc_mv") or []
+    direction = status.get("io_direction") or 0
+    value = status.get("io_value") or 0
+    pins = []
+    for io in range(8):
+        li = io + _LABEL_OFFSET
+        pins.append({
+            "pin": f"IO{io}",
+            "label": labels[li] if li < len(labels) and labels[li] else None,
+            "voltage_mv": adc[io] if io < len(adc) else None,
+            "direction": "output" if direction & (1 << io) else "input",
+            "level": 1 if value & (1 << io) else 0,
+        })
+    return {
+        "firmware": {
+            "git_hash": status.get("version_firmware_git_hash"),
+            "build_date": status.get("version_firmware_date"),
+            "hardware": (
+                f"{status.get('version_hardware_major')}."
+                f"{status.get('version_hardware_minor')}"
+            ),
+            "bpio_version": (
+                f"{status.get('version_flatbuffers_major')}."
+                f"{status.get('version_flatbuffers_minor')}"
+            ),
+        },
+        "mode": status.get("mode_current"),
+        "psu": {
+            "enabled": status.get("psu_enabled"),
+            "set_mv": status.get("psu_set_mv"),
+            "set_ma": status.get("psu_set_ma"),
+            "measured_mv": status.get("psu_measured_mv"),
+            "measured_ma": status.get("psu_measured_ma"),
+            "current_limit_tripped": bool(status.get("psu_current_error")),
+        },
+        "pullups_enabled": status.get("pullup_enabled"),
+        "pins": pins,
+        "max_read": status.get("mode_max_read"),
+        "max_write": status.get("mode_max_write"),
+        "warnings": _psu_warnings(status),
+    }
+
+
+async def tool_get_status(hardware: Any) -> dict[str, Any]:
+    """Read the BusPirate's state: firmware, mode, PSU readings, pins."""
+    return _summarize_status(hardware.get_status())
+
+
+async def _psu_check(hardware: Any) -> dict[str, Any]:
+    """Measure the PSU right after a change and flag a tripped current limit."""
+    await asyncio.sleep(PSU_SETTLE_S)
+    try:
+        status = hardware.get_status()
+    except Exception as exc:  # report, do not hide the PSU change itself
+        return {"psu_check_error": str(exc)}
+    return {
+        "measured_mv": status.get("psu_measured_mv"),
+        "measured_ma": status.get("psu_measured_ma"),
+        "current_limit_tripped": bool(status.get("psu_current_error")),
+        "warnings": _psu_warnings(status),
+    }
+
+
 async def tool_set_voltage(
     hardware: Any,
     voltage_v: float,
@@ -304,6 +385,7 @@ async def tool_set_voltage(
         "voltage_v": voltage_v,
         "current_limit_ma": current_limit_ma,
         "error": None,
+        **(await _psu_check(hardware)),
     }
 
 
@@ -313,10 +395,13 @@ async def tool_set_power(
 ) -> dict[str, Any]:
     """Enable or disable power supply."""
     result = hardware.set_power(enable)
-    return {
+    out = {
         "applied": result,
         "power": "on" if enable else "off",
     }
+    if enable:
+        out.update(await _psu_check(hardware))
+    return out
 
 
 async def tool_enter_download_mode(
@@ -358,6 +443,99 @@ async def tool_enter_download_mode(
             f"Target should be in UART download mode."
         ),
     }
+
+
+# -- GPIO and pull-ups --
+
+GPIO_PULSE_MAX_MS = 10_000
+
+
+def _check_gpio_pin(hardware: Any, pin: Any) -> tuple[dict[str, Any] | None, dict]:
+    """Validate pin and refuse pins the active mode owns.
+
+    Returns (error_or_None, status). Driving a mode pin (UART TX, SPI CLK,
+    I2C SDA...) as GPIO would fight the protocol and the target.
+    """
+    if not isinstance(pin, int) or isinstance(pin, bool) or not 0 <= pin <= 7:
+        return {"error": f"pin must be 0-7, got: {pin}"}, {}
+    status = hardware.get_status()
+    labels = status.get("mode_pin_labels") or []
+    label = labels[pin + _LABEL_OFFSET] if pin + _LABEL_OFFSET < len(labels) else ""
+    if label:
+        return {
+            "error": (
+                f"IO{pin} is in use by the {status.get('mode_current')} mode "
+                f"as '{label}'. Pick a free pin."
+            ),
+        }, status
+    return None, status
+
+
+def _pin_state(status: dict[str, Any], pin: int) -> dict[str, Any]:
+    return _summarize_status(status)["pins"][pin]
+
+
+async def tool_gpio_set(hardware: Any, pin: int, level: int) -> dict[str, Any]:
+    """Drive a free IO pin high or low."""
+    err, _ = _check_gpio_pin(hardware, pin)
+    if err:
+        return err
+    if level not in (0, 1):
+        return {"error": f"level must be 0 or 1, got: {level}"}
+    hardware.set_pin_output(pin, high=bool(level))
+    return {"pin": f"IO{pin}", **_pin_state(hardware.get_status(), pin)}
+
+
+async def tool_gpio_release(hardware: Any, pin: int) -> dict[str, Any]:
+    """Return a free IO pin to input (high impedance)."""
+    err, _ = _check_gpio_pin(hardware, pin)
+    if err:
+        return err
+    hardware.release_pin(pin)
+    return {"pin": f"IO{pin}", **_pin_state(hardware.get_status(), pin)}
+
+
+async def tool_gpio_read(hardware: Any, pin: int | None = None) -> dict[str, Any]:
+    """Read direction, level and voltage of one IO pin, or all of them."""
+    pins = _summarize_status(hardware.get_status())["pins"]
+    if pin is None:
+        return {"pins": pins}
+    if not isinstance(pin, int) or isinstance(pin, bool) or not 0 <= pin <= 7:
+        return {"error": f"pin must be 0-7, got: {pin}"}
+    return pins[pin]
+
+
+async def tool_gpio_pulse(
+    hardware: Any, pin: int, level: int = 0, duration_ms: int = 100,
+) -> dict[str, Any]:
+    """Drive a free pin to level for duration_ms, then release it (e.g. a reset)."""
+    err, _ = _check_gpio_pin(hardware, pin)
+    if err:
+        return err
+    if level not in (0, 1):
+        return {"error": f"level must be 0 or 1, got: {level}"}
+    if not isinstance(duration_ms, int) or not 1 <= duration_ms <= GPIO_PULSE_MAX_MS:
+        return {"error": f"duration_ms must be 1-{GPIO_PULSE_MAX_MS}, got: {duration_ms}"}
+    hardware.set_pin_output(pin, high=bool(level))
+    try:
+        await asyncio.sleep(duration_ms / 1000)
+    finally:
+        hardware.release_pin(pin)
+    return {"pin": f"IO{pin}", "level": level, "duration_ms": duration_ms,
+            "released": True}
+
+
+async def tool_set_pullups(hardware: Any, enable: bool) -> dict[str, Any]:
+    """Enable or disable the pull-up resistors on all IO pins."""
+    hardware.set_pullups(enable)
+    status = hardware.get_status()
+    out = {"pullups_enabled": status.get("pullup_enabled")}
+    if enable and not status.get("psu_enabled"):
+        out["warning"] = (
+            "Pull-ups connect to VOUT. With the PSU off they only work if "
+            "the target supplies VOUT/VREF."
+        )
+    return out
 
 
 def _enter_bridge_mode(terminal_port: str) -> bool:
